@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "974105282248",
+    "project_id": "brewverse-593dc",
+    "storage_bucket": "brewverse-593dc.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:974105282248:android:fb89d0d8fd9b620b5187fd",
+        "android_client_info": {
+          "package_name": "com.example.brewverse_cafe_manager"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAPqcNUY_D7SiT8174XXUsQIKODx4vJPLI"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
