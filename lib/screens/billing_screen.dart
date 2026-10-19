@@ -329,6 +329,7 @@ class _BillingScreenState extends State<BillingScreen> {
     }
     if (!mounted) return;
     showDialog<void>(
+      useRootNavigator: false,
       context: context,
       builder: (_) => ThermalPrinterDialog(
         cafeName: cafeName,

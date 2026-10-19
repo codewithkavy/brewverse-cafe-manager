@@ -108,12 +108,14 @@ class _InventoryScreenState extends State<InventoryScreen> {
   }
 
   Future<T?> _openDialog<T>(Widget page) => showDialog<T>(
+        useRootNavigator: false,
         context: context,
         builder: (_) => Theme(data: AppTheme.emeraldLight, child: page),
       );
 
   Future<void> _openForm(Widget page, String successMessage) async {
     final saved = await showDialog<bool>(
+      useRootNavigator: false,
       context: context,
       builder: (_) => ScaffoldMessenger(
         child: Theme(data: AppTheme.emeraldLight, child: page),

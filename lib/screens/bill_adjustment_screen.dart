@@ -53,6 +53,7 @@ class _BillAdjustmentScreenState extends State<BillAdjustmentScreen> {
   Future<bool> _confirm(
       {required bool isVoid, required int? amountMinor}) async {
     return await showDialog<bool>(
+          useRootNavigator: false,
           context: context,
           builder: (context) => AlertDialog(
             title: Text(isVoid ? 'Void this bill?' : 'Issue this refund?'),

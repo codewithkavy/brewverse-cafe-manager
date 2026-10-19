@@ -27,7 +27,10 @@ class AuthGate extends StatelessWidget {
             if (!useEmulators && !allowLiveTenantMode) {
               return const _TenantModeSafetyScreen();
             }
-            return CafeWorkspaceGate(uid: snapshot.data!.uid);
+            return CafeWorkspaceGate(
+              key: ValueKey(snapshot.data!.uid),
+              uid: snapshot.data!.uid,
+            );
           }
           return const HomeScreen();
         }

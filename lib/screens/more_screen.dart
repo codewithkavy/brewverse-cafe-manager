@@ -142,6 +142,7 @@ class MoreScreen extends StatelessWidget {
 
   void _showInfo(BuildContext context, String message) {
     showDialog<void>(
+      useRootNavigator: false,
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('BrewVerse'),

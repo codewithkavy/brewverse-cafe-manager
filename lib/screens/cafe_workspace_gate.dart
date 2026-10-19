@@ -42,10 +42,24 @@ class _CafeWorkspaceGateState extends State<CafeWorkspaceGate> {
   String? _selectedCafeId;
   bool _choosingCafe = false;
 
+  late Stream<List<CafeMembership>> _memberships =
+      _membershipService.watchForUser(widget.uid);
+
+  @override
+  void didUpdateWidget(covariant CafeWorkspaceGate oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.uid != widget.uid) {
+      _selectedCafeId = null;
+      _choosingCafe = false;
+      _memberships = _membershipService.watchForUser(widget.uid);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return StreamBuilder<List<CafeMembership>>(
-      stream: _membershipService.watchForUser(widget.uid),
+      key: ValueKey(widget.uid),
+      stream: _memberships,
       builder: (context, snapshot) {
         if (snapshot.hasError) {
           return _GateMessage(
@@ -73,13 +87,21 @@ class _CafeWorkspaceGateState extends State<CafeWorkspaceGate> {
             active.length == 1 && !_choosingCafe ? active.single : null;
 
         if (selected != null) {
-          return (widget.homeBuilder ?? _defaultHome)(
-            context,
-            selected,
-            () => setState(() {
-              _selectedCafeId = null;
-              _choosingCafe = true;
-            }),
+          final membership = selected;
+          // Keep pushed screens and dialogs within the authorized workspace.
+          // Revocation, role changes, and switching users discard this stack.
+          return Navigator(
+            key: ValueKey((widget.uid, membership.cafeId, membership.role)),
+            onGenerateRoute: (_) => MaterialPageRoute<void>(
+              builder: (context) => (widget.homeBuilder ?? _defaultHome)(
+                context,
+                membership,
+                () => setState(() {
+                  _selectedCafeId = null;
+                  _choosingCafe = true;
+                }),
+              ),
+            ),
           );
         }
 

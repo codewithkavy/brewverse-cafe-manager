@@ -104,6 +104,7 @@ class _CafeTeamScreenState extends State<CafeTeamScreen> {
 
   Future<void> _addMember() async {
     final input = await showDialog<({String email, String role})>(
+      useRootNavigator: false,
       context: context,
       builder: (context) => _AddMemberDialog(
         canGrantManager: widget.callerRole == CafeRole.owner,
@@ -135,6 +136,7 @@ class _CafeTeamScreenState extends State<CafeTeamScreen> {
 
   Future<void> _revoke(CafeMembership membership) async {
     final confirmed = await showDialog<bool>(
+      useRootNavigator: false,
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Revoke café access?'),
