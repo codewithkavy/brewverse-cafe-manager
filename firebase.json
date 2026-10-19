@@ -1,1 +1,24 @@
-{"flutter":{"platforms":{"android":{"default":{"projectId":"brewverse-593dc","appId":"1:974105282248:android:fb89d0d8fd9b620b5187fd","fileOutput":"android/app/google-services.json"}},"dart":{"lib/firebase_options.dart":{"projectId":"brewverse-593dc","configurations":{"android":"1:974105282248:android:fb89d0d8fd9b620b5187fd"}}}}}}
+{
+  "flutter": {
+    "platforms": {
+      "android": {
+        "default": {
+          "projectId": "brewverse-593dc",
+          "appId": "1:974105282248:android:fb89d0d8fd9b620b5187fd",
+          "fileOutput": "android/app/google-services.json"
+        }
+      },
+      "dart": {
+        "lib/firebase_options.dart": {
+          "projectId": "brewverse-593dc",
+          "configurations": {
+            "android": "1:974105282248:android:fb89d0d8fd9b620b5187fd"
+          }
+        }
+      }
+    }
+  },
+  "firestore": {
+    "indexes": "firestore.indexes.json"
+  }
+}

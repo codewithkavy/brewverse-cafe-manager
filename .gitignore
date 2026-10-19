@@ -65,3 +65,17 @@ build-log.txt
 /windows/flutter/generated_plugin_registrant.cc
 /windows/flutter/generated_plugin_registrant.h
 /windows/flutter/generated_plugins.cmake
+# Dependencies, emulator state, and local credentials
+**/node_modules/
+**/.firebase/
+**/coverage/
+**/lib/.cache/
+**/application_default_credentials.json
+**/*credentials*.json
+**/*.pem
+**/*.p12
+**/*.key
+/staged-files.txt
+/how *.gitignore
+
+**/failures/

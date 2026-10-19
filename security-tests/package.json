@@ -1,9 +1,10 @@
 {
   "name": "brewverse-security-tests",
   "private": true,
-  "description": "Isolated Firestore Emulator authorization tests for BrewVerse SaaS. Not production deployment configuration.",
+  "description": "Isolated Firestore and Storage Emulator authorization tests for BrewVerse SaaS. Not production deployment configuration.",
   "scripts": {
-    "test": "mocha --timeout 10000"
+    "test": "mocha --timeout 10000 test/firestore.rules.test.cjs",
+    "test:storage": "mocha --timeout 10000 test/storage.rules.test.cjs"
   },
   "devDependencies": {
     "@firebase/rules-unit-testing": "^4.0.1",

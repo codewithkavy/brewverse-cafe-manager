@@ -8,6 +8,8 @@ enum CafeRole {
   manager,
   staff;
 
+  bool get canManageInventory => this == owner || this == manager;
+
   static CafeRole parse(Object? value) {
     return CafeRole.values.firstWhere(
       (role) => role.name == value,
@@ -43,6 +45,8 @@ class CafeMembership {
   final CafeMembershipStatus status;
 
   bool get isActive => status == CafeMembershipStatus.active;
+
+  bool get canManageInventory => role.canManageInventory;
 
   factory CafeMembership.fromMap(Map<String, dynamic> data) {
     final uid = data['uid'];

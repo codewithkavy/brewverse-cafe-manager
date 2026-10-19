@@ -1,0 +1,27 @@
+{
+  "documents": {
+    "stock_items": [
+      { "id": "espresso", "data": { "name": "Espresso", "category": "finished", "sellingPrice": 3.5 } },
+      { "id": "beans", "data": { "name": "Coffee beans", "category": "ingredient", "quantity": 1200 } }
+    ],
+    "product_recipes": [
+      { "id": "espresso", "data": { "productId": "espresso", "ingredients": [{ "stockItemId": "beans", "quantity": 18 }], "packaging": [] } }
+    ],
+    "bills": [
+      { "id": "sample-bill", "data": { "items": [{ "productId": "espresso", "quantity": 1 }] } }
+    ],
+    "stock_movements": [
+      { "id": "sample-movement", "data": { "stockItemId": "beans", "type": "addition", "quantityChange": 1200 } }
+    ]
+  },
+  "ownerByRecord": {
+    "stock_items/espresso": "sample-cafe",
+    "stock_items/beans": "sample-cafe",
+    "product_recipes/espresso": "sample-cafe",
+    "bills/sample-bill": "sample-cafe",
+    "stock_movements/sample-movement": "sample-cafe"
+  },
+  "ownerUidByCafe": {
+    "sample-cafe": "operator-reviewed-owner-uid"
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "name": "brewverse-functions",
+  "private": true,
+  "description": "Trusted BrewVerse tenant, inventory, checkout, and analytics handlers.",
+  "main": "src/index.js",
+  "engines": {
+    "node": "22"
+  },
+  "scripts": {
+    "test": "node --test test/membership_service.test.js test/inventory_service.test.js test/legacy_migration_preflight.test.js test/firestore_indexes.test.js test/loyalty_service.test.js",
+    "test:callables": "node --test test/callable_emulator.test.cjs",
+    "migration:preflight": "node scripts/preflight_legacy_migration.js"
+  },
+  "dependencies": {
+    "firebase-admin": "^14.5.0",
+    "firebase-functions": "^7.4.0"
+  }
+}

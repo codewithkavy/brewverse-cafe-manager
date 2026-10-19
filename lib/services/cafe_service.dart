@@ -1,12 +1,33 @@
+import 'dart:convert';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 
 import '../models/stock_item.dart';
+import 'cafe_functions_service.dart';
+import 'tenant_cafe_data_service.dart';
 
 class CafeService {
-  CafeService({FirebaseFirestore? firestore})
-      : db = firestore ?? FirebaseFirestore.instance;
+  static const int _maxSafeMinorUnits = 9007199254740991;
+  // Each distinct stock record needs an update and a movement write, plus the
+  // bill itself. Keep the transaction below Firestore's 500-write limit.
+  static const int _maxCheckoutStockItems = 249;
+  CafeService({
+    FirebaseFirestore? firestore,
+    String? cafeId,
+    CafeFunctionsService? functionsService,
+  })  : db = firestore ?? FirebaseFirestore.instance,
+        cafeId = cafeId == null ? null : _validateCafeId(cafeId),
+        _providedFunctionsService = functionsService;
 
   final FirebaseFirestore db;
+  final String? cafeId;
+  final CafeFunctionsService? _providedFunctionsService;
+
+  late final TenantCafeDataService? _tenantData = cafeId == null
+      ? null
+      : TenantCafeDataService(cafeId: cafeId!, firestore: db);
+  late final CafeFunctionsService _functionsService =
+      _providedFunctionsService ?? CafeFunctionsService();
 
   CollectionReference<Map<String, dynamic>> get stock =>
       db.collection('stock_items');
@@ -14,8 +35,7 @@ class CafeService {
   CollectionReference<Map<String, dynamic>> get recipes =>
       db.collection('product_recipes');
 
-  CollectionReference<Map<String, dynamic>> get bills =>
-      db.collection('bills');
+  CollectionReference<Map<String, dynamic>> get bills => db.collection('bills');
 
   CollectionReference<Map<String, dynamic>> get movements =>
       db.collection('stock_movements');
@@ -23,20 +43,68 @@ class CafeService {
   // INVENTORY
 
   Stream<List<StockItem>> watchStock() {
+    final tenantData = _tenantData;
+    if (tenantData != null) return tenantData.watchStock();
     return stock.orderBy('name').snapshots().map(
-          (snapshot) =>
-          snapshot.docs.map(StockItem.fromDoc).toList(),
-    );
+          (snapshot) => snapshot.docs.map(StockItem.fromDoc).toList(),
+        );
+  }
+
+  Stream<List<Map<String, dynamic>>> watchRecentMovements({int limit = 100}) {
+    final tenantData = _tenantData;
+    if (tenantData != null) {
+      return tenantData.watchRecentMovements(limit: limit);
+    }
+    if (limit < 1 || limit > 500) {
+      throw ArgumentError('Movement limit must be between 1 and 500.');
+    }
+    return movements
+        .orderBy('createdAt', descending: true)
+        .orderBy(FieldPath.documentId, descending: true)
+        .limit(limit)
+        .snapshots()
+        .map(
+          (snapshot) => snapshot.docs
+              .map((doc) => {...doc.data(), 'id': doc.id})
+              .toList(growable: false),
+        );
   }
 
   Future<String> addItem(StockItem item) async {
+    validateNewItem(item);
+    final tenantId = cafeId;
+    if (tenantId != null) {
+      return _functionsService.createStockItem(cafeId: tenantId, item: item);
+    }
     final doc = stock.doc();
-    await doc.set(item.toMap());
+    final initialQuantity = item.quantity;
+
+    await db.runTransaction((tx) async {
+      tx.set(doc, {
+        ...item.toMap(),
+        'createdAt': FieldValue.serverTimestamp(),
+      });
+
+      if (initialQuantity > 0) {
+        final movementRef = movements.doc();
+        tx.set(movementRef, {
+          'stockItemId': doc.id,
+          'stockItemName': item.name,
+          'stockItemUnit': item.unit,
+          'type': 'addition',
+          'quantityChange': initialQuantity,
+          'quantityAfter': initialQuantity,
+          'reason': 'Opening stock',
+          'createdAt': FieldValue.serverTimestamp(),
+        });
+      }
+    });
     return doc.id;
   }
 
   // NEW: Update item details without overwriting live stock.
   Future<void> updateItem(StockItem item) async {
+    validateNewItem(item);
     if (item.id.trim().isEmpty) {
       throw ArgumentError('Item ID cannot be empty.');
     }
@@ -51,6 +119,9 @@ class CafeService {
       }
 
       final currentData = snapshot.data()!;
+      if (cafeId != null && currentData['cafeId'] != cafeId) {
+        throw StateError('This inventory item belongs to another café.');
+      }
       final updatedData = item.toMap();
 
       // Keep the actual current stock quantity.
@@ -77,6 +148,17 @@ class CafeService {
       );
     }
 
+    final tenantId = cafeId;
+    if (tenantId != null) {
+      await _functionsService.addStock(
+        cafeId: tenantId,
+        stockItemId: itemId,
+        quantity: quantity,
+        reason: reason,
+      );
+      return;
+    }
+
     final itemRef = stock.doc(itemId);
     final movementRef = movements.doc();
 
@@ -98,6 +180,8 @@ class CafeService {
 
       tx.set(movementRef, {
         'stockItemId': itemId,
+        'stockItemName': data['name'],
+        'stockItemUnit': data['unit'],
         'type': 'addition',
         'quantityChange': quantity,
         'quantityAfter': updated,
@@ -108,10 +192,16 @@ class CafeService {
   }
 
   Future<void> setPhotoUrl(
-      String itemId,
-      String photoUrl,
-      ) {
-    return stock.doc(itemId).update({
+    String itemId,
+    String photoUrl,
+  ) async {
+    if (cafeId != null) {
+      final snapshot = await stock.doc(itemId).get();
+      if (!snapshot.exists || snapshot.data()?['cafeId'] != cafeId) {
+        throw StateError('Inventory item not found in this café.');
+      }
+    }
+    await stock.doc(itemId).update({
       'photoUrl': photoUrl,
       'updatedAt': FieldValue.serverTimestamp(),
     });
@@ -124,14 +214,18 @@ class CafeService {
     required List<Map<String, dynamic>> ingredients,
     List<Map<String, dynamic>> packaging = const [],
   }) async {
-    if (ingredients.isEmpty) {
-      throw ArgumentError(
-        'A recipe must contain at least one ingredient.',
-      );
-    }
+    validateRecipe(ingredients: ingredients, packaging: packaging);
 
-    _validateRecipeLines(ingredients, 'ingredients');
-    _validateRecipeLines(packaging, 'packaging');
+    final tenantId = cafeId;
+    if (tenantId != null) {
+      await _functionsService.saveRecipe(
+        cafeId: tenantId,
+        productId: productId,
+        ingredients: ingredients,
+        packaging: packaging,
+      );
+      return;
+    }
 
     final productRef = stock.doc(productId);
     final recipeRef = recipes.doc(productId);
@@ -155,8 +249,7 @@ class CafeService {
       }
 
       final refs = ingredientIds.map((id) => stock.doc(id)).toList();
-      final snapshots =
-      <DocumentSnapshot<Map<String, dynamic>>>[];
+      final snapshots = <DocumentSnapshot<Map<String, dynamic>>>[];
 
       for (final ref in refs) {
         snapshots.add(await tx.get(ref));
@@ -185,19 +278,67 @@ class CafeService {
     });
   }
 
+  Future<Map<String, dynamic>?> loadRecipe(String productId) async {
+    final snapshot = await recipes.doc(productId).get();
+    final data = snapshot.data();
+    if (cafeId != null && data?['cafeId'] != cafeId) return null;
+    return data;
+  }
+
+  Future<String?> loadCafeName() async {
+    final tenantId = cafeId;
+    if (tenantId == null) return null;
+
+    final snapshot = await db.collection('cafes').doc(tenantId).get();
+    final name = snapshot.data()?['name'];
+    if (name is! String || name.trim().isEmpty) return null;
+    return name.trim();
+  }
+
+  Future<Map<String, dynamic>?> loadBill(String billId) async {
+    final tenantData = _tenantData;
+    if (tenantData != null) return tenantData.getBill(billId);
+    final snapshot = await bills.doc(billId).get();
+    final data = snapshot.data();
+    return data == null ? null : {...data, 'id': snapshot.id};
+  }
+
+  Future<Map<String, dynamic>> lookupLoyaltyCustomer({
+    required String phoneNumber,
+  }) async {
+    final tenantId = cafeId;
+    if (tenantId == null) {
+      throw StateError('Loyalty lookup requires a selected café workspace.');
+    }
+    return _functionsService.lookupLoyaltyCustomer(
+      cafeId: tenantId,
+      phoneNumber: phoneNumber,
+    );
+  }
+
+  Future<Map<String, dynamic>> getLoyaltySettings() async {
+    final tenantId = cafeId;
+    if (tenantId == null) {
+      throw StateError('Loyalty settings require a selected café workspace.');
+    }
+    return _functionsService.getLoyaltySettings(cafeId: tenantId);
+  }
+
   // TRANSACTIONAL CHECKOUT
 
   Future<String> checkout({
     required String checkoutId,
     required Map<String, int> cart,
     required String orderType,
+    String? customerPhone,
+    int redeemPoints = 0,
   }) async {
     if (checkoutId.trim().isEmpty) {
       throw ArgumentError('Checkout ID cannot be empty.');
     }
 
-    if (cart.isEmpty) {
-      throw ArgumentError('Cannot checkout an empty cart.');
+    if (cart.isEmpty || cart.length > 100) {
+      throw ArgumentError('Cart must contain between 1 and 100 products.');
     }
 
     if (orderType != 'dineIn' && orderType != 'takeaway') {
@@ -206,10 +347,32 @@ class CafeService {
       );
     }
 
+    if (redeemPoints < 0) {
+      throw ArgumentError('Redeemed points cannot be negative.');
+    }
+
     for (final entry in cart.entries) {
-      if (entry.key.trim().isEmpty || entry.value <= 0) {
+      if (entry.key.trim().isEmpty || entry.value <= 0 || entry.value > 10000) {
         throw ArgumentError('Invalid product ID or quantity.');
       }
+    }
+
+    final tenantId = cafeId;
+    if (tenantId != null) {
+      return _functionsService.checkout(
+        cafeId: tenantId,
+        checkoutId: checkoutId,
+        cart: cart,
+        orderType: orderType,
+        customerPhone: customerPhone,
+        redeemPoints: redeemPoints,
+      );
+    }
+    if ((customerPhone != null && customerPhone.trim().isNotEmpty) ||
+        redeemPoints > 0) {
+      throw StateError(
+        'Loyalty checkout requires the trusted café checkout service.',
+      );
     }
 
     final billRef = bills.doc(checkoutId);
@@ -217,34 +380,32 @@ class CafeService {
     final sortedEntries = cart.entries.toList()
       ..sort((a, b) => a.key.compareTo(b.key));
 
-    final requestKey = [
-      orderType,
-      for (final entry in sortedEntries)
-        '${entry.key}:${entry.value}',
-    ].join('|');
+    final requestKey = buildCheckoutRequestKey(
+      orderType: orderType,
+      cart: cart,
+    );
+    final legacyRequestKey = _buildLegacyCheckoutRequestKey(
+      orderType: orderType,
+      cart: cart,
+    );
 
     return db.runTransaction<String>((tx) async {
       final existingBill = await tx.get(billRef);
-
-      if (existingBill.exists) {
-        final existingKey = existingBill.data()?['requestKey'];
-
-        if (existingKey != requestKey) {
-          throw StateError(
-            'This checkout ID was already used for a different bill.',
-          );
-        }
-
-        return billRef.id;
-      }
+      final existingCheckout = resolveExistingCheckout(
+        existingBill: existingBill.data(),
+        requestKey: requestKey,
+        legacyRequestKey: legacyRequestKey,
+        orderType: orderType,
+        cart: cart,
+        billId: billRef.id,
+      );
+      if (existingCheckout != null) return existingCheckout;
 
       final productIds = sortedEntries.map((e) => e.key).toList();
 
-      final productSnaps =
-      <String, DocumentSnapshot<Map<String, dynamic>>>{};
+      final productSnaps = <String, DocumentSnapshot<Map<String, dynamic>>>{};
 
-      final recipeSnaps =
-      <String, DocumentSnapshot<Map<String, dynamic>>>{};
+      final recipeSnaps = <String, DocumentSnapshot<Map<String, dynamic>>>{};
 
       for (final productId in productIds) {
         final productRef = stock.doc(productId);
@@ -264,7 +425,7 @@ class CafeService {
         if (!recipeSnap.exists) {
           throw StateError(
             'No recipe configured for '
-                '${productSnap.data()!['name'] ?? productId}.',
+            '${productSnap.data()!['name'] ?? productId}.',
           );
         }
 
@@ -272,7 +433,7 @@ class CafeService {
         recipeSnaps[productId] = recipeSnap;
       }
 
-      final requiredStock = <String, double>{};
+      final recipesForRequirements = <String, Map<String, dynamic>>{};
       final billItems = <Map<String, dynamic>>[];
 
       for (final entry in sortedEntries) {
@@ -281,14 +442,18 @@ class CafeService {
         final product = productSnaps[productId]!.data()!;
         final recipe = recipeSnaps[productId]!.data()!;
 
-        final price = _number(product['sellingPrice'], 'sellingPrice');
-
-        if (price < 0) {
-          throw StateError('Product price cannot be negative.');
+        final unitPricePaise = _currencyMinorUnits(
+          product['sellingPrice'],
+          'sellingPrice',
+        );
+        if (unitPricePaise > _maxSafeMinorUnits ~/ quantity) {
+          throw StateError('Bill amount is too large.');
         }
+        final lineTotalPaise = unitPricePaise * quantity;
+        final price = unitPricePaise / 100;
 
         final ingredientLines =
-        _recipeLines(recipe['ingredients'], 'ingredients');
+            _recipeLines(recipe['ingredients'], 'ingredients');
 
         if (ingredientLines.isEmpty) {
           throw StateError(
@@ -296,42 +461,35 @@ class CafeService {
           );
         }
 
-        for (final line in ingredientLines) {
-          _addRequirement(
-            requiredStock,
-            line,
-            quantity,
-            'ingredient',
-          );
-        }
-
         if (orderType == 'takeaway') {
-          final packagingLines =
           _recipeLines(recipe['packaging'], 'packaging');
-
-          for (final line in packagingLines) {
-            _addRequirement(
-              requiredStock,
-              line,
-              quantity,
-              'packaging',
-            );
-          }
         }
+        recipesForRequirements[productId] = recipe;
 
         billItems.add({
           'productId': productId,
           'name': product['name'] ?? 'Unnamed product',
           'quantity': quantity,
           'unitPrice': price,
-          'lineTotal': price * quantity,
+          'lineTotal': lineTotalPaise / 100,
         });
       }
 
-      final stockSnaps =
-      <String, DocumentSnapshot<Map<String, dynamic>>>{};
+      final requiredStock = calculateRequiredStock(
+        cart: cart,
+        recipes: recipesForRequirements,
+        includePackaging: orderType == 'takeaway',
+      );
+
+      final stockSnaps = <String, DocumentSnapshot<Map<String, dynamic>>>{};
 
       final stockIds = requiredStock.keys.toList()..sort();
+
+      if (stockIds.length > _maxCheckoutStockItems) {
+        throw StateError(
+          'This order references too many distinct stock items.',
+        );
+      }
 
       for (final id in stockIds) {
         final snap = await tx.get(stock.doc(id));
@@ -363,22 +521,27 @@ class CafeService {
 
           throw StateError(
             'Insufficient stock for $name. '
-                'Available: $current, required: $required.',
+            'Available: $current, required: $required.',
           );
         }
 
         updatedQuantities[id] = current - required;
       }
 
-      final total = billItems.fold<double>(
-        0,
-            (runningTotal, item) =>
-        runningTotal + (item['lineTotal'] as double),
-      );
+      var totalPaise = 0;
+      for (final item in billItems) {
+        final linePaise = _currencyMinorUnits(item['lineTotal'], 'lineTotal');
+        if (totalPaise > _maxSafeMinorUnits - linePaise) {
+          throw StateError('Bill total is too large.');
+        }
+        totalPaise += linePaise;
+      }
+      final total = totalPaise / 100;
 
       for (final id in stockIds) {
         final required = requiredStock[id]!;
         final updated = updatedQuantities[id]!;
+        final data = stockSnaps[id]!.data()!;
 
         tx.update(stock.doc(id), {
           'quantity': updated,
@@ -389,6 +552,8 @@ class CafeService {
 
         tx.set(movementRef, {
           'stockItemId': id,
+          'stockItemName': data['name'],
+          'stockItemUnit': data['unit'],
           'type': 'sale',
           'quantityChange': -required,
           'quantityAfter': updated,
@@ -414,6 +579,14 @@ class CafeService {
 
   // VALIDATION HELPERS
 
+  static String _validateCafeId(String value) {
+    if (value.trim().isEmpty || value.contains('/')) {
+      throw ArgumentError.value(
+          value, 'cafeId', 'Must be a non-empty café ID.');
+    }
+    return value.trim();
+  }
+
   static double _number(dynamic value, String field) {
     if (value is! num) {
       throw StateError('Invalid numeric field: $field.');
@@ -428,10 +601,174 @@ class CafeService {
     return result;
   }
 
-  static void _validateRecipeLines(
-      List<Map<String, dynamic>> lines,
-      String field,
-      ) {
+  static int _currencyMinorUnits(dynamic value, String field) {
+    final amount = _number(value, field);
+    if (amount < 0) throw StateError('$field cannot be negative.');
+    final scaled = amount * 100;
+    if (!scaled.isFinite || scaled > _maxSafeMinorUnits) {
+      throw StateError('$field is too large to represent in paise.');
+    }
+    return scaled.round();
+  }
+
+  static void validateRecipe({
+    required List<Map<String, dynamic>> ingredients,
+    List<Map<String, dynamic>> packaging = const [],
+  }) {
+    if (ingredients.isEmpty) {
+      throw ArgumentError('A recipe must contain at least one ingredient.');
+    }
+    validateRecipeLines(ingredients, 'ingredients');
+    validateRecipeLines(packaging, 'packaging');
+  }
+
+  static void validateNewItem(StockItem item) {
+    if (item.name.trim().isEmpty) {
+      throw ArgumentError('Item name cannot be empty.');
+    }
+    if (item.category != 'ingredient' && item.category != 'finished') {
+      throw ArgumentError('Item category must be ingredient or finished.');
+    }
+    if (item.unit.trim().isEmpty) {
+      throw ArgumentError('Item unit cannot be empty.');
+    }
+
+    for (final entry in <String, double>{
+      'quantity': item.quantity,
+      'minimumQuantity': item.minimumQuantity,
+      'purchasePricePerUnit': item.purchasePricePerUnit,
+      'sellingPrice': item.sellingPrice,
+    }.entries) {
+      if (!entry.value.isFinite || entry.value < 0) {
+        throw ArgumentError('${entry.key} must be finite and non-negative.');
+      }
+    }
+  }
+
+  static String buildCheckoutRequestKey({
+    required String orderType,
+    required Map<String, int> cart,
+  }) {
+    final sortedEntries = cart.entries.toList()
+      ..sort((a, b) => a.key.compareTo(b.key));
+    return jsonEncode([
+      orderType,
+      for (final entry in sortedEntries) [entry.key, entry.value],
+    ]);
+  }
+
+  static String _buildLegacyCheckoutRequestKey({
+    required String orderType,
+    required Map<String, int> cart,
+  }) {
+    final sortedEntries = cart.entries.toList()
+      ..sort((a, b) => a.key.compareTo(b.key));
+    return [
+      orderType,
+      for (final entry in sortedEntries) '${entry.key}:${entry.value}',
+    ].join('|');
+  }
+
+  static String? resolveExistingCheckout({
+    required Map<String, dynamic>? existingBill,
+    required String requestKey,
+    String? legacyRequestKey,
+    String? orderType,
+    Map<String, int>? cart,
+    required String billId,
+  }) {
+    if (existingBill == null) return null;
+    final savedRequestKey = existingBill['requestKey'];
+    final legacyRetry = savedRequestKey == legacyRequestKey &&
+        legacyRequestKey != null &&
+        orderType != null &&
+        cart != null &&
+        _matchesLegacyBill(
+          existingBill: existingBill,
+          requestKey: requestKey,
+          legacyRequestKey: legacyRequestKey,
+        );
+    if (savedRequestKey != requestKey && !legacyRetry) {
+      throw StateError(
+          'This checkout ID was already used for a different bill.');
+    }
+    return billId;
+  }
+
+  static bool _matchesLegacyBill({
+    required Map<String, dynamic> existingBill,
+    required String requestKey,
+    required String legacyRequestKey,
+  }) {
+    final rawItems = existingBill['items'];
+    final orderType = existingBill['orderType'];
+    if (rawItems is! List ||
+        (orderType != 'dineIn' && orderType != 'takeaway')) {
+      return false;
+    }
+    final savedCart = <String, int>{};
+    for (final rawItem in rawItems) {
+      if (rawItem is! Map) return false;
+      final item = Map<String, dynamic>.from(rawItem);
+      final productId = item['productId'];
+      final quantity = item['quantity'];
+      if (productId is! String ||
+          productId.isEmpty ||
+          quantity is! int ||
+          quantity <= 0 ||
+          savedCart.containsKey(productId)) {
+        return false;
+      }
+      savedCart[productId] = quantity;
+    }
+    return savedCart.isNotEmpty &&
+        buildCheckoutRequestKey(
+              orderType: orderType as String,
+              cart: savedCart,
+            ) ==
+            requestKey &&
+        _buildLegacyCheckoutRequestKey(
+              orderType: orderType,
+              cart: savedCart,
+            ) ==
+            legacyRequestKey;
+  }
+
+  static Map<String, double> calculateRequiredStock({
+    required Map<String, int> cart,
+    required Map<String, Map<String, dynamic>> recipes,
+    required bool includePackaging,
+  }) {
+    final requiredStock = <String, double>{};
+    for (final entry in cart.entries) {
+      final recipe = recipes[entry.key];
+      if (recipe == null) {
+        throw StateError('No recipe configured for ${entry.key}.');
+      }
+
+      final ingredientLines =
+          _recipeLines(recipe['ingredients'], 'ingredients');
+      if (ingredientLines.isEmpty) {
+        throw StateError('Product ${entry.key} has an empty recipe.');
+      }
+      for (final line in ingredientLines) {
+        _addRequirement(requiredStock, line, entry.value, 'ingredient');
+      }
+
+      if (includePackaging) {
+        final packagingLines = _recipeLines(recipe['packaging'], 'packaging');
+        for (final line in packagingLines) {
+          _addRequirement(requiredStock, line, entry.value, 'packaging');
+        }
+      }
+    }
+    return requiredStock;
+  }
+
+  static void validateRecipeLines(
+    List<Map<String, dynamic>> lines,
+    String field,
+  ) {
     for (final line in lines) {
       final id = line['stockItemId'];
       final quantity = line['quantity'];
@@ -440,9 +777,7 @@ class CafeService {
         throw ArgumentError('$field entries need a stockItemId.');
       }
 
-      if (quantity is! num ||
-          !quantity.toDouble().isFinite ||
-          quantity <= 0) {
+      if (quantity is! num || !quantity.toDouble().isFinite || quantity <= 0) {
         throw ArgumentError(
           '$field quantities must be finite and greater than zero.',
         );
@@ -451,9 +786,9 @@ class CafeService {
   }
 
   static List<Map<String, dynamic>> _recipeLines(
-      dynamic value,
-      String field,
-      ) {
+    dynamic value,
+    String field,
+  ) {
     if (value == null && field == 'packaging') {
       return [];
     }
@@ -488,11 +823,11 @@ class CafeService {
   }
 
   static void _addRequirement(
-      Map<String, double> requiredStock,
-      Map<String, dynamic> line,
-      int productQuantity,
-      String field,
-      ) {
+    Map<String, double> requiredStock,
+    Map<String, dynamic> line,
+    int productQuantity,
+    String field,
+  ) {
     final id = line['stockItemId'] as String;
     final perProduct = _number(line['quantity'], field);
     final amount = perProduct * productQuantity;

@@ -1,0 +1,44 @@
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+    function membershipPath(cafeId) {
+      return /databases/(default)/documents/cafe_members/$(request.auth.uid + '_' + cafeId);
+    }
+
+    function activeMember(cafeId) {
+      return request.auth != null
+        && firestore.exists(membershipPath(cafeId))
+        && firestore.get(membershipPath(cafeId)).data.uid == request.auth.uid
+        && firestore.get(membershipPath(cafeId)).data.cafeId == cafeId
+        && firestore.get(membershipPath(cafeId)).data.status == 'active'
+        && firestore.get(membershipPath(cafeId)).data.role in ['owner', 'manager', 'staff'];
+    }
+
+    function cafeManager(cafeId) {
+      return activeMember(cafeId)
+        && firestore.get(membershipPath(cafeId)).data.role in ['owner', 'manager'];
+    }
+
+    function validProductImage() {
+      return request.resource != null
+        && request.resource.size <= 5 * 1024 * 1024
+        && request.resource.contentType in [
+          'image/jpeg',
+          'image/png',
+          'image/webp'
+        ];
+    }
+
+    match /cafes/{cafeId}/products/{fileName} {
+      allow read: if activeMember(cafeId);
+      allow create, update: if cafeManager(cafeId) && validProductImage();
+      allow delete: if cafeManager(cafeId);
+    }
+
+    // Legacy and unscoped paths are deliberately denied by default.
+    match /{path=**} {
+      allow read, write: if false;
+    }
+  }
+}

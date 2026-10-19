@@ -1,8 +1,8 @@
 # BrewVerse SaaS Foundation — Architecture and Migration Plan
 
-**Status:** Proposal for review  
+**Status:** Isolated emulator-tested backend and opt-in Flutter tenant path exist; neither is deployed or enabled by default.
 **Branch:** `feature/saas-foundation`  
-**Scope:** Planning only. This document does not change Firebase, Firestore data, Storage, or application behavior.
+**Scope:** Planning, isolated emulator-tested backend prototypes, and a guarded opt-in Flutter tenant path. No production Firebase configuration, Firestore data, Storage, or deployed rules have been changed.
 
 ## Goals
 
@@ -59,6 +59,18 @@ The current app uses top-level collections:
 
 The target design must associate every business record with a `cafeId` (or place it beneath a café-scoped path). The choice between adding `cafeId` fields and moving data under `cafes/{cafeId}/...` must be made before implementation. A staged `cafeId` migration may be less disruptive to existing queries, but it is safe only when rules and query changes are coordinated.
 
+### Tenant query indexes to prepare before rollout
+
+The current tenant and reporting queries need these composite indexes in the eventual production index manifest:
+
+| Collection | Fields | Query used by |
+| --- | --- | --- |
+| `stock_movements` | `cafeId` ascending, `createdAt` descending | Recent tenant movement history |
+| `bills` | `cafeId` ascending, `createdAt` descending | Recent tenant bill history |
+| `bills` | `cafeId` ascending, `createdAt` ascending | Bounded sales-summary date range |
+
+The member list filters on `cafeId`, orders by document ID ascending for stable cursor pagination, and sorts each returned page by UID for display. Firestore appends `__name__` using the direction of the last indexed field by default; the automatic ascending `cafeId` index should therefore support this ordering without an additional composite index. The root `firestore.indexes.json` now records the three tenant history/report composites above, and `firebase.json` points to that manifest. This only defines local deployment inputs; no indexes were deployed. Emulator tests do not validate index availability, so verify them against a staging database before production rollout. See [Firestore index ordering](https://firebase.google.com/docs/firestore/query-data/index-overview#default_ordering_and_the_name_field).
+
 ## Authorization principles
 
 1. Firebase Authentication proves identity; it does not by itself grant access to a café.
@@ -89,6 +101,17 @@ These are the collections previously checked, not proof that no other root colle
 7. Schedule a controlled production migration with a maintenance window and rollback plan.
 8. Deploy restrictive rules only after all required records and app queries are ready. Never leave a temporary permissive ruleset in place.
 9. Verify that Café A cannot read or change Café B data, including direct document access and Storage objects.
+
+### Offline ownership preflight
+
+`functions/src/legacy_migration_preflight.js` is a pure helper for checking an explicitly supplied, normalized JSON snapshot. It does not read Firebase or write documents. `functions/scripts/preflight_legacy_migration.js` is a local read-only CLI wrapper and reads only the explicit file argument (or stdin when passed `-`); it has no Firebase imports or project configuration. For example, from the repository root:
+
+```bash
+npm --prefix functions run migration:preflight -- examples/legacy_migration_preflight.sample.json
+npm --prefix functions run migration:preflight -- C:/path/to/operator-reviewed-export.json
+```
+
+The sample is synthetic. Input must contain all four collection document lists, an explicit `collection/documentId -> cafeId` assignment for every record, and an operator-reviewed owner UID for every café. The helper checks stock categories, recipe product and ingredient categories, line quantities, bill product references, and tenant consistency. The output is a deterministic list of proposed `cafeId` additions plus blocking errors and warnings; exit code 0 means no blocking errors, and exit code 2 means the plan needs correction. A missing stock item referenced by an old movement is a warning for manual history review; cross-café or unmapped recipe and bill references block the plan. `safeToReview` does not authorize or execute a migration. A raw native Firestore export is not this JSON format; normalize a copy and validate data types before running the preflight. Back up separately before any migration tool is designed.
 
 ## Implementation sequence
 

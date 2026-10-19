@@ -6,42 +6,129 @@ service cloud.firestore {
       return request.auth != null;
     }
 
-    function membershipId(cafeId) {
-      return request.auth.uid + '_' + cafeId;
+    function membershipPath(cafeId) {
+      return /databases/$(database)/documents/cafe_members/$(request.auth.uid + '_' + cafeId);
     }
 
     function activeMember(cafeId) {
       return signedIn()
-        && exists(/databases/$(database)/documents/cafe_members/$(membershipId(cafeId)))
-        && get(/databases/$(database)/documents/cafe_members/$(membershipId(cafeId))).data.uid == request.auth.uid
-        && get(/databases/$(database)/documents/cafe_members/$(membershipId(cafeId))).data.cafeId == cafeId
-        && get(/databases/$(database)/documents/cafe_members/$(membershipId(cafeId))).data.status == 'active';
+        && exists(membershipPath(cafeId))
+        && get(membershipPath(cafeId)).data.uid == request.auth.uid
+        && get(membershipPath(cafeId)).data.cafeId == cafeId
+        && get(membershipPath(cafeId)).data.status == 'active'
+        && get(membershipPath(cafeId)).data.role in ['owner', 'manager', 'staff'];
     }
 
-    // Membership records are provisioned by trusted server/admin code only.
+    function cafeManager(cafeId) {
+      return activeMember(cafeId)
+        && get(membershipPath(cafeId)).data.role in ['owner', 'manager'];
+    }
+
+    function hasCafe(data) {
+      return data.cafeId is string && data.cafeId.size() > 0;
+    }
+
+    function canReadCafeRecord(data) {
+      return hasCafe(data) && activeMember(data.cafeId);
+    }
+
+    function canUpdateCafeRecord() {
+      return hasCafe(resource.data)
+        && hasCafe(request.resource.data)
+        && resource.data.cafeId == request.resource.data.cafeId
+        && cafeManager(resource.data.cafeId);
+    }
+
+    function validInventoryDetails(data) {
+      return data.keys().hasAll([
+          'name',
+          'category',
+          'unit',
+          'quantity',
+          'minimumQuantity',
+          'purchasePricePerUnit',
+          'sellingPrice'
+        ])
+        && data.name is string
+        && data.name.size() > 0
+        && data.name.size() <= 120
+        && data.name.matches('.*\\S.*')
+        && data.category in ['ingredient', 'finished']
+        && data.unit is string
+        && data.unit.size() > 0
+        && data.unit.size() <= 32
+        && data.unit.matches('.*\\S.*')
+        && data.quantity is number
+        && data.quantity >= 0
+        && data.minimumQuantity is number
+        && data.minimumQuantity >= 0
+        && data.purchasePricePerUnit is number
+        && data.purchasePricePerUnit >= 0
+        && data.sellingPrice is number
+        && data.sellingPrice >= 0
+        && (!('photoUrl' in data)
+          || (data.photoUrl is string && data.photoUrl.size() <= 2048))
+        && (!('updatedAt' in data) || data.updatedAt == request.time);
+    }
+
+    function canEditInventoryDetails() {
+      return canUpdateCafeRecord()
+        && validInventoryDetails(request.resource.data)
+        && request.resource.data.quantity == resource.data.quantity
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'name',
+          'category',
+          'unit',
+          'minimumQuantity',
+          'purchasePricePerUnit',
+          'sellingPrice',
+          'photoUrl',
+          'updatedAt'
+        ]);
+    }
+
+    // Memberships are provisioned by trusted server/admin code. Members can
+    // read only their own records so the app can select an authorized cafe.
     match /cafe_members/{membershipDocId} {
-      allow read, write: if false;
+      allow get, list: if signedIn() && resource.data.uid == request.auth.uid;
+      allow create, update, delete: if false;
     }
 
-    // Initial test scope only: inventory isolation.
-    // Expand to recipes, bills, movements, cafes, and Storage only after
-    // the model and role matrix are finalized. This file is test-only.
+    // Café metadata is read-only to clients. Creation and ownership changes
+    // belong to a trusted onboarding workflow.
+    match /cafes/{cafeId} {
+      allow read: if activeMember(cafeId);
+      allow write: if false;
+    }
+
     match /stock_items/{itemId} {
-      allow read: if resource.data.cafeId is string
-        && activeMember(resource.data.cafeId);
-
-      allow create: if request.resource.data.cafeId is string
-        && activeMember(request.resource.data.cafeId);
-
-      allow update: if resource.data.cafeId is string
-        && request.resource.data.cafeId == resource.data.cafeId
-        && activeMember(resource.data.cafeId);
-
-      allow delete: if resource.data.cafeId is string
-        && activeMember(resource.data.cafeId);
+      allow read: if canReadCafeRecord(resource.data);
+      // Creation, quantity changes, and deletion must go through trusted
+      // backend operations that also create the corresponding movement.
+      allow create, delete: if false;
+      allow update: if canEditInventoryDetails();
     }
 
-    // Deny all other paths until explicitly specified and tested.
+    match /product_recipes/{recipeId} {
+      allow read: if canReadCafeRecord(resource.data);
+      // Trusted recipe writes validate every referenced stock item belongs
+      // to the same café. Client array writes cannot prove that invariant.
+      allow create, update, delete: if false;
+    }
+
+    // Bills and movements are written atomically by trusted checkout and
+    // inventory handlers. Clients only read records in their active café.
+    match /bills/{billId} {
+      allow read: if canReadCafeRecord(resource.data);
+      allow create, update, delete: if false;
+    }
+
+    match /stock_movements/{movementId} {
+      allow read: if canReadCafeRecord(resource.data);
+      allow create, update, delete: if false;
+    }
+
+    // Deny every path not explicitly specified above.
     match /{document=**} {
       allow read, write: if false;
     }

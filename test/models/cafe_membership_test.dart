@@ -31,6 +31,19 @@ void main() {
       }
     });
 
+    test('only owners and managers can manage inventory', () {
+      CafeMembership membershipFor(CafeRole role) => CafeMembership(
+            uid: 'user-123',
+            cafeId: 'cafe-abc',
+            role: role,
+            status: CafeMembershipStatus.active,
+          );
+
+      expect(membershipFor(CafeRole.owner).canManageInventory, isTrue);
+      expect(membershipFor(CafeRole.manager).canManageInventory, isTrue);
+      expect(membershipFor(CafeRole.staff).canManageInventory, isFalse);
+    });
+
     test('revoked membership is not active', () {
       final membership = CafeMembership.fromMap({
         'uid': 'user-123',
