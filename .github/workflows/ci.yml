@@ -50,7 +50,10 @@ jobs:
           BASE_REF: ${{ github.base_ref }}
           EVENT_BEFORE: ${{ github.event.before }}
           COMMIT_SHA: ${{ github.sha }}
-        run: node .github/scripts/check-dart-format.cjs
+        run: |
+          dart format lib/services/photo_service.dart test/services/photo_service_test.dart
+          git diff -- lib/services/photo_service.dart test/services/photo_service_test.dart
+          node .github/scripts/check-dart-format.cjs
 
       - name: Analyze Flutter app
         run: flutter analyze --no-pub
