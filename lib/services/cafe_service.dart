@@ -124,8 +124,10 @@ class CafeService {
       }
       final updatedData = item.toMap();
 
-      // Keep the actual current stock quantity.
+      // Keep stock and photos independent from the rest of the edit form.
+      // An older open dialog must not undo a more recent photo update.
       updatedData['quantity'] = currentData['quantity'];
+      updatedData['photoUrl'] = currentData['photoUrl'] ?? item.photoUrl;
 
       // Do not let an edit overwrite the original creation time.
       updatedData.remove('createdAt');
