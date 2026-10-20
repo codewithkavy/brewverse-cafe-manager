@@ -4,4 +4,6 @@
          to allow setting breakpoints, to provide hot reload, etc.
     -->
     <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- Allow local emulator HTTP only in debug builds. -->
+    <application android:networkSecurityConfig="@xml/firebase_emulator_network_security_config" />
 </manifest>
