@@ -853,18 +853,12 @@ class _AddItemDialogState extends State<_AddItemDialog> {
                                   _selectedPhoto!.bytes,
                                   fit: BoxFit.cover,
                                 )
-                              : const Column(
-                                  mainAxisAlignment: MainAxisAlignment.center,
-                                  children: [
-                                    Icon(Icons.photo_camera_outlined,
-                                        color: AppTheme.orangeDeep, size: 23),
-                                    SizedBox(height: 5),
-                                    Text('Photo',
-                                        style: TextStyle(
-                                          color: AppTheme.orangeDeep,
-                                          fontSize: 10,
-                                        )),
-                                  ],
+                              : const Center(
+                                  child: Icon(
+                                    Icons.photo_camera_outlined,
+                                    color: AppTheme.orangeDeep,
+                                    size: 23,
+                                  ),
                                 ),
                         ),
                       ),
