@@ -69,21 +69,58 @@ jobs:
       - name: Install pinned Firebase CLI
         run: npm install --global firebase-tools@15.34.0
 
+      - name: Cache Firebase emulator binaries
+        id: firebase-emulator-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/firebase/emulators
+          key: firebase-emulators-${{ runner.os }}-${{ runner.arch }}-15.34.0
+
+      - name: Download Firebase emulator binaries
+        if: steps.firebase-emulator-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          # Retry downloads only. Authorization and integration tests run once.
+          for emulator in firestore storage; do
+            for attempt in 1 2 3; do
+              if firebase "setup:emulators:$emulator" --debug; then
+                break
+              fi
+              if [ "$attempt" -eq 3 ]; then
+                echo "Failed to prepare $emulator after $attempt attempts" >&2
+                exit 1
+              fi
+              sleep "$((attempt * 5))"
+            done
+          done
+
       - name: Run Firestore authorization tests
         working-directory: security-tests
-        run: firebase emulators:exec --config firebase.json --project brewverse-security-tests --only firestore "npm test"
+        run: firebase emulators:exec --debug --config firebase.json --project brewverse-security-tests --only firestore "npm test"
 
       - name: Run Storage authorization tests
         working-directory: security-tests
-        run: firebase emulators:exec --config firebase.emulators.json --project brewverse-security-tests --only firestore,storage "npm run test:storage"
+        run: firebase emulators:exec --debug --config firebase.emulators.json --project brewverse-security-tests --only firestore,storage "npm run test:storage"
 
       - name: Run trusted backend service tests
         working-directory: functions
-        run: firebase emulators:exec --config ../security-tests/firebase.emulators.json --project brewverse-security-tests --only firestore "npm test"
+        run: firebase emulators:exec --debug --config ../security-tests/firebase.emulators.json --project brewverse-security-tests --only firestore "npm test"
 
       - name: Run callable integration tests
         working-directory: functions
-        run: firebase emulators:exec --config ../security-tests/firebase.emulators.json --project brewverse-security-tests --only auth,firestore,functions "npm run test:callables"
+        run: firebase emulators:exec --debug --config ../security-tests/firebase.emulators.json --project brewverse-security-tests --only auth,firestore,functions "npm run test:callables"
+
+      - name: Save Firebase startup diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: firebase-emulator-debug-logs
+          path: |
+            **/firebase-debug.log
+            **/firestore-debug.log
+            **/storage-debug.log
+          if-no-files-found: warn
+          retention-days: 3
 
       - name: Save Android debug APK
         uses: actions/upload-artifact@v4
