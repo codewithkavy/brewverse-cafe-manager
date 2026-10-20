@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
 
     steps:
@@ -26,7 +26,7 @@ jobs:
           channel: stable
           cache: true
 
-      - name: Set up Java for Firebase Emulators
+      - name: Set up Java for Android
         uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -36,10 +36,7 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '22'
-          cache: npm
-          cache-dependency-path: |
-            functions/package-lock.json
-            security-tests/package-lock.json
+
 
       - name: Install Flutter packages
         run: flutter pub get
@@ -61,8 +58,44 @@ jobs:
       - name: Build Android debug APK
         run: flutter build apk --debug --no-pub
 
+      - name: Report runner disk usage
+        if: always()
+        run: df -h
+
+      - name: Save Android debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: brewverse-debug-apk
+          path: build/app/outputs/flutter-apk/app-debug.apk
+          if-no-files-found: error
+
+  # Keep Android/Gradle output off the Firebase runner. The combined job ran
+  # out of disk while installing Node dependencies/downloading emulator JARs.
+  firebase:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Java for Firebase Emulators
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            functions/package-lock.json
+            security-tests/package-lock.json
+
       - name: Install Node test dependencies
         run: |
+          df -h
           npm ci --prefix functions
           npm ci --prefix security-tests
 
@@ -70,29 +103,10 @@ jobs:
         run: npm install --global firebase-tools@15.34.0
 
       - name: Cache Firebase emulator binaries
-        id: firebase-emulator-cache
         uses: actions/cache@v4
         with:
           path: ~/.cache/firebase/emulators
           key: firebase-emulators-${{ runner.os }}-${{ runner.arch }}-15.34.0
-
-      - name: Download Firebase emulator binaries
-        if: steps.firebase-emulator-cache.outputs.cache-hit != 'true'
-        shell: bash
-        run: |
-          # Retry downloads only. Authorization and integration tests run once.
-          for emulator in firestore storage; do
-            for attempt in 1 2 3; do
-              if firebase "setup:emulators:$emulator" --debug; then
-                break
-              fi
-              if [ "$attempt" -eq 3 ]; then
-                echo "Failed to prepare $emulator after $attempt attempts" >&2
-                exit 1
-              fi
-              sleep "$((attempt * 5))"
-            done
-          done
 
       - name: Run Firestore authorization tests
         working-directory: security-tests
@@ -121,10 +135,3 @@ jobs:
             **/storage-debug.log
           if-no-files-found: warn
           retention-days: 3
-
-      - name: Save Android debug APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: brewverse-debug-apk
-          path: build/app/outputs/flutter-apk/app-debug.apk
-          if-no-files-found: error
