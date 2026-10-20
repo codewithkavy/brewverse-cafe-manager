@@ -124,8 +124,10 @@ class CafeService {
       }
       final updatedData = item.toMap();
 
-      // Keep the actual current stock quantity.
+      // Keep stock and photos independent from the rest of the edit form.
+      // An older open dialog must not undo a more recent photo update.
       updatedData['quantity'] = currentData['quantity'];
+      updatedData['photoUrl'] = currentData['photoUrl'] ?? item.photoUrl;
 
       // Do not let an edit overwrite the original creation time.
       updatedData.remove('createdAt');
@@ -204,6 +206,38 @@ class CafeService {
     await stock.doc(itemId).update({
       'photoUrl': photoUrl,
       'updatedAt': FieldValue.serverTimestamp(),
+    });
+  }
+
+  /// Compare-and-set the image link, so a stale form cannot silently
+  /// overwrite another cashier's photo. Only use after the new object upload
+  /// has succeeded; callers clean up that object when this transaction fails.
+  Future<void> replacePhotoUrl({
+    required String itemId,
+    required String expectedUrl,
+    required String newUrl,
+  }) async {
+    if (itemId.trim().isEmpty) {
+      throw ArgumentError('Item ID cannot be empty.');
+    }
+    final doc = stock.doc(itemId);
+    await db.runTransaction((tx) async {
+      final snapshot = await tx.get(doc);
+      if (!snapshot.exists) {
+        throw StateError('Inventory item no longer exists.');
+      }
+      final data = snapshot.data()!;
+      if (cafeId != null && data['cafeId'] != cafeId) {
+        throw StateError('Inventory item belongs to another café.');
+      }
+      final existingUrl = data['photoUrl'] as String? ?? '';
+      if (existingUrl != expectedUrl) {
+        throw StateError('This photo changed elsewhere. Reopen the item.');
+      }
+      tx.update(doc, {
+        'photoUrl': newUrl,
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
     });
   }
 

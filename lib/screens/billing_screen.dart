@@ -191,13 +191,22 @@ class _BillingScreenState extends State<BillingScreen> {
         _checkingOut = false;
       });
 
+      final permissionDenied = error.toString().contains('permission-denied');
+      final message = permissionDenied
+          ? widget.cafeId == null
+              ? 'Checkout is blocked: this session uses legacy billing, '
+                  'but Firestore denied access to bills. No sale was '
+                  'confirmed. Ask an administrator to verify café workspace '
+                  'setup and deployed security rules.'
+              : 'Checkout is blocked by café access permissions. No sale '
+                  'was confirmed. Ask an administrator to verify your '
+                  'membership and deployed checkout services.'
+          : 'Checkout failed. No successful bill was confirmed.\\n$error';
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           backgroundColor: Colors.red.shade900,
-          content: Text(
-            'Checkout failed. No successful bill was confirmed.\n$error',
-          ),
-          duration: const Duration(seconds: 6),
+          content: Text(message),
+          duration: const Duration(seconds: 8),
         ),
       );
       return;

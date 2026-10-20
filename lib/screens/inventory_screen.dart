@@ -702,6 +702,8 @@ class _AddItemDialogState extends State<_AddItemDialog> {
   String _category = 'ingredient';
   String _unit = 'g';
   bool _saving = false;
+  bool _pickingPhoto = false;
+  SelectedProductPhoto? _selectedPhoto;
 
   @override
   void dispose() {
@@ -729,8 +731,27 @@ class _AddItemDialogState extends State<_AddItemDialog> {
     return null;
   }
 
+  Future<void> _choosePhoto() async {
+    final cafeId = widget.service.cafeId;
+    if (cafeId == null || _saving || _pickingPhoto) return;
+    setState(() => _pickingPhoto = true);
+    try {
+      final selected = await PhotoService(cafeId: cafeId).choosePhoto();
+      if (selected != null && mounted) {
+        setState(() => _selectedPhoto = selected);
+      }
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not select photo: $error')),
+      );
+    } finally {
+      if (mounted) setState(() => _pickingPhoto = false);
+    }
+  }
+
   Future<void> _saveItem() async {
-    if (_saving || !_formKey.currentState!.validate()) return;
+    if (_saving || _pickingPhoto || !_formKey.currentState!.validate()) return;
 
     setState(() => _saving = true);
 
@@ -746,7 +767,47 @@ class _AddItemDialogState extends State<_AddItemDialog> {
         sellingPrice: _number(_selling)!,
       );
 
-      await widget.service.addItem(item);
+      final itemId = await widget.service.addItem(item);
+      final selected = _selectedPhoto;
+      final cafeId = widget.service.cafeId;
+      if (selected != null && cafeId != null) {
+        final photos = PhotoService(cafeId: cafeId);
+        UploadedProductPhoto? uploaded;
+        try {
+          uploaded = await photos.uploadPhoto(itemId, selected);
+          await widget.service.replacePhotoUrl(
+            itemId: itemId,
+            expectedUrl: '',
+            newUrl: uploaded.url,
+          );
+        } catch (error) {
+          if (uploaded != null) {
+            try {
+              await photos.deleteUploadedPhoto(uploaded);
+            } catch (_) {
+              // A failed cleanup must not result in a duplicate stock item.
+            }
+          }
+          if (mounted) {
+            await showDialog<void>(
+              context: context,
+              builder: (_) => AlertDialog(
+                title: const Text('Item saved without a photo'),
+                content: Text(
+                  'Your inventory item was created, but its photo could not '
+                  'be saved. Edit the item to try again.\\n$error',
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.of(context).pop(),
+                    child: const Text('OK'),
+                  ),
+                ],
+              ),
+            );
+          }
+        }
+      }
 
       if (!mounted) return;
       Navigator.of(context).pop(true);
@@ -765,7 +826,7 @@ class _AddItemDialogState extends State<_AddItemDialog> {
         title: 'Add stock item',
         saveLabel: 'Save item',
         saving: _saving,
-        onSave: _saving ? null : _saveItem,
+        onSave: _saving || _pickingPhoto ? null : _saveItem,
         child: Form(
           key: _formKey,
           child: Column(
@@ -773,25 +834,34 @@ class _AddItemDialogState extends State<_AddItemDialog> {
             children: [
               Row(
                 children: [
-                  Container(
-                    width: 64,
-                    constraints: const BoxConstraints(minHeight: 72),
-                    padding: const EdgeInsets.symmetric(vertical: 12),
-                    decoration: BoxDecoration(
-                      color: AppTheme.softOrange,
+                  InkWell(
+                    key: const Key('addItemPhotoTile'),
+                    onTap: widget.service.cafeId == null ||
+                            _saving ||
+                            _pickingPhoto
+                        ? null
+                        : _choosePhoto,
+                    child: ClipRRect(
                       borderRadius: BorderRadius.circular(14),
-                    ),
-                    child: const Column(
-                      mainAxisSize: MainAxisSize.min,
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Icon(Icons.photo_camera_outlined,
-                            color: AppTheme.orangeDeep, size: 23),
-                        SizedBox(height: 5),
-                        Text('Photo',
-                            style: TextStyle(
-                                color: AppTheme.orangeDeep, fontSize: 10)),
-                      ],
+                      child: SizedBox(
+                        width: 64,
+                        height: 72,
+                        child: ColoredBox(
+                          color: AppTheme.softOrange,
+                          child: _selectedPhoto != null
+                              ? Image.memory(
+                                  _selectedPhoto!.bytes,
+                                  fit: BoxFit.cover,
+                                )
+                              : const Center(
+                                  child: Icon(
+                                    Icons.photo_camera_outlined,
+                                    color: AppTheme.orangeDeep,
+                                    size: 23,
+                                  ),
+                                ),
+                        ),
+                      ),
                     ),
                   ),
                   const SizedBox(width: 12),
@@ -805,9 +875,38 @@ class _AddItemDialogState extends State<_AddItemDialog> {
                   ),
                 ],
               ),
-              const SizedBox(height: 7),
-              const Text('Save the item first, then add a photo in Edit item.',
-                  style: TextStyle(color: _muted, fontSize: 11, height: 1.4)),
+              const SizedBox(height: 8),
+              if (widget.service.cafeId != null) ...[
+                OutlinedButton.icon(
+                  key: const Key('addItemChoosePhoto'),
+                  onPressed: _saving || _pickingPhoto ? null : _choosePhoto,
+                  icon: _pickingPhoto
+                      ? const SizedBox.square(
+                          dimension: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.add_photo_alternate_outlined),
+                  label: Text(
+                    _pickingPhoto
+                        ? 'Opening gallery…'
+                        : _selectedPhoto == null
+                            ? 'Choose product photo (optional)'
+                            : 'Change selected photo',
+                  ),
+                ),
+                if (_selectedPhoto != null)
+                  TextButton.icon(
+                    onPressed: _saving
+                        ? null
+                        : () => setState(() => _selectedPhoto = null),
+                    icon: const Icon(Icons.close_rounded, size: 18),
+                    label: const Text('Clear selection'),
+                  ),
+              ] else
+                const Text(
+                  'Photos require a selected café workspace.',
+                  style: TextStyle(color: _muted, fontSize: 11),
+                ),
               const SizedBox(height: 10),
               DropdownButtonFormField<String>(
                 initialValue: _category,
@@ -988,21 +1087,77 @@ class _EditItemDialogState extends State<_EditItemDialog> {
     if (_saving || _uploadingPhoto || cafeId == null) return;
 
     setState(() => _uploadingPhoto = true);
+    final photos = PhotoService(cafeId: cafeId);
+    UploadedProductPhoto? uploaded;
     try {
-      final photoUrl =
-          await PhotoService(cafeId: cafeId).chooseAndUpload(widget.item.id);
-      if (photoUrl == null) return;
+      final selected = await photos.choosePhoto();
+      if (selected == null) return;
 
-      await widget.service.setPhotoUrl(widget.item.id, photoUrl);
+      final previousUrl = _photoUrl;
+      uploaded = await photos.uploadPhoto(widget.item.id, selected);
+      await widget.service.replacePhotoUrl(
+        itemId: widget.item.id,
+        expectedUrl: previousUrl,
+        newUrl: uploaded.url,
+      );
       if (!mounted) return;
-      setState(() => _photoUrl = photoUrl);
+      setState(() => _photoUrl = uploaded!.url);
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Product photo updated.')),
+      );
+      if (previousUrl.isNotEmpty) {
+        try {
+          await photos.deletePreviousPhoto(widget.item.id, previousUrl);
+        } catch (_) {
+          // The newly saved photo is valid even when old cleanup fails.
+        }
+      }
+    } catch (error) {
+      if (uploaded != null) {
+        try {
+          await photos.deleteUploadedPhoto(uploaded);
+        } catch (_) {
+          // Best-effort cleanup. Do not overwrite the original failure.
+        }
+      }
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not update product photo: $error')),
+      );
+    } finally {
+      if (mounted) setState(() => _uploadingPhoto = false);
+    }
+  }
+
+  Future<void> _removePhoto() async {
+    final cafeId = widget.service.cafeId;
+    if (cafeId == null || _uploadingPhoto || _saving || _photoUrl.isEmpty) {
+      return;
+    }
+    setState(() => _uploadingPhoto = true);
+    final previousUrl = _photoUrl;
+    try {
+      await widget.service.replacePhotoUrl(
+        itemId: widget.item.id,
+        expectedUrl: previousUrl,
+        newUrl: '',
+      );
+      if (!mounted) return;
+      setState(() => _photoUrl = '');
+      try {
+        await PhotoService(cafeId: cafeId)
+            .deletePreviousPhoto(widget.item.id, previousUrl);
+      } catch (_) {
+        // The Firestore reference is cleared; old-object cleanup may retry.
+      }
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Product photo removed.')),
       );
     } catch (error) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Could not upload product photo: $error')),
+        SnackBar(content: Text('Could not remove product photo: $error')),
       );
     } finally {
       if (mounted) setState(() => _uploadingPhoto = false);
@@ -1053,7 +1208,7 @@ class _EditItemDialogState extends State<_EditItemDialog> {
         title: 'Edit item details',
         saveLabel: 'Save changes',
         saving: _saving,
-        onSave: _saving ? null : _save,
+        onSave: _saving || _uploadingPhoto ? null : _save,
         child: Form(
           key: _formKey,
           child: Column(
@@ -1087,9 +1242,16 @@ class _EditItemDialogState extends State<_EditItemDialog> {
                     ),
                   ],
                 ),
+                if (_photoUrl.isNotEmpty)
+                  TextButton.icon(
+                    key: const Key('editItemRemovePhoto'),
+                    onPressed: _saving || _uploadingPhoto ? null : _removePhoto,
+                    icon: const Icon(Icons.delete_outline_rounded),
+                    label: const Text('Remove product photo'),
+                  ),
                 const SizedBox(height: 8),
                 const Text(
-                  'JPEG product photos up to 5 MiB are stored in this café.',
+                  'JPEG, PNG or WebP product photos up to 5 MiB are stored in this café.',
                   style: TextStyle(color: _muted, fontSize: 12),
                 ),
                 const SizedBox(height: 10),
