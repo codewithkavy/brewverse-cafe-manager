@@ -191,7 +191,8 @@ class PhotoService {
     final suffix =
         uploadId == null ? '' : '_${_validateId(uploadId, 'uploadId')}';
     if (!['jpg', 'png', 'webp'].contains(extension)) {
-      throw ArgumentError.value(extension, 'extension', 'Unsupported image type.');
+      throw ArgumentError.value(
+          extension, 'extension', 'Unsupported image type.');
     }
     return 'cafes/$safeCafeId/products/$safeItemId$suffix.$extension';
   }
