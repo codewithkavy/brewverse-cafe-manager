@@ -48,12 +48,13 @@ service firebase.storage {
       return (!firestore.exists(subscription)
         && request.auth.token.aud == 'brewverse-security-tests') || (
         firestore.get(subscription).data.get('suspended', false) == false
-        && firestore.get(subscription).data.expiresAt is timestamp
-        && firestore.get(subscription).data.get('graceDays', 0) is int
-        && firestore.get(subscription).data.get('graceDays', 0) >= 0
-        && firestore.get(subscription).data.get('graceDays', 0) <= 14
-        && request.time < firestore.get(subscription).data.expiresAt
-          + duration.value(firestore.get(subscription).data.get('graceDays', 0), 'd'));
+        && (firestore.get(subscription).data.get('licenseType', '') == 'permanent'
+          || (firestore.get(subscription).data.expiresAt is timestamp
+            && firestore.get(subscription).data.get('graceDays', 0) is int
+            && firestore.get(subscription).data.get('graceDays', 0) >= 0
+            && firestore.get(subscription).data.get('graceDays', 0) <= 14
+            && request.time < firestore.get(subscription).data.expiresAt
+              + duration.value(firestore.get(subscription).data.get('graceDays', 0), 'd'))));
     }
 
     match /cafes/{cafeId}/products/{fileName} {

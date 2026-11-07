@@ -42,12 +42,13 @@ service cloud.firestore {
       return (!exists(subscription)
         && request.auth.token.aud == 'brewverse-security-tests') || (
         get(subscription).data.get('suspended', false) == false
-        && get(subscription).data.expiresAt is timestamp
-        && get(subscription).data.get('graceDays', 0) is int
-        && get(subscription).data.get('graceDays', 0) >= 0
-        && get(subscription).data.get('graceDays', 0) <= 14
-        && request.time < get(subscription).data.expiresAt
-          + duration.value(get(subscription).data.get('graceDays', 0), 'd'));
+        && (get(subscription).data.get('licenseType', '') == 'permanent'
+          || (get(subscription).data.expiresAt is timestamp
+            && get(subscription).data.get('graceDays', 0) is int
+            && get(subscription).data.get('graceDays', 0) >= 0
+            && get(subscription).data.get('graceDays', 0) <= 14
+            && request.time < get(subscription).data.expiresAt
+              + duration.value(get(subscription).data.get('graceDays', 0), 'd'))));
     }
 
     function hasCafe(data) {

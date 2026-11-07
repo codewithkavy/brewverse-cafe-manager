@@ -97,6 +97,33 @@ const memberDb = (uid) => testEnv.authenticatedContext(uid).firestore();
 const record = (db, collectionName, id) => doc(db, collectionName, id);
 
 describe('BrewVerse test-only tenant authorization rules', () => {
+  it('permanent licenses enforce owner, manager, staff and cross-café boundaries', async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      for (const cafeId of ['cafeA', 'cafeB']) {
+        await setDoc(doc(context.firestore(), 'cafe_subscriptions', cafeId), {
+          licenseType: 'permanent', suspended: false,
+        });
+      }
+    });
+    const owner = memberDb('ownerA');
+    const manager = memberDb('managerA');
+    const staff = memberDb('staffA');
+    const otherOwner = memberDb('ownerB');
+    await assertSucceeds(updateDoc(doc(owner, 'stock_items', 'stock_itemsA'), { name: 'Owner edit' }));
+    await assertSucceeds(updateDoc(doc(manager, 'stock_items', 'stock_itemsA'), { name: 'Manager edit' }));
+    await assertSucceeds(getDoc(doc(staff, 'stock_items', 'stock_itemsA')));
+    await assertFails(updateDoc(doc(staff, 'stock_items', 'stock_itemsA'), { name: 'Staff edit' }));
+    await assertFails(getDoc(doc(owner, 'stock_items', 'stock_itemsB')));
+    await assertFails(getDoc(doc(otherOwner, 'stock_items', 'stock_itemsA')));
+    await assertFails(updateDoc(doc(owner, 'stock_items', 'stock_itemsB'), { name: 'Foreign edit' }));
+    await assertFails(updateDoc(doc(otherOwner, 'stock_items', 'stock_itemsA'), { name: 'Foreign edit' }));
+    await assertFails(updateDoc(doc(owner, 'cafe_subscriptions', 'cafeA'), { suspended: false }));
+    await testEnv.withSecurityRulesDisabled(context =>
+      updateDoc(doc(context.firestore(), 'cafe_subscriptions', 'cafeA'), { suspended: true }));
+    await assertFails(updateDoc(doc(owner, 'stock_items', 'stock_itemsA'), { name: 'Suspended edit' }));
+    await assertSucceeds(getDoc(doc(owner, 'stock_items', 'stock_itemsA')));
+    await assertSucceeds(updateDoc(doc(otherOwner, 'stock_items', 'stock_itemsB'), { name: 'Unrelated café edit' }));
+  });
   it('subscription expiry and suspension block direct inventory edits while retaining reads', async () => {
     const db=memberDb('ownerA'), item=doc(db,'stock_items','stock_itemsA');
     for(const [allowed,state] of [
@@ -104,6 +131,8 @@ describe('BrewVerse test-only tenant authorization rules', () => {
       [true,{expiresAt:Timestamp.fromMillis(Date.now()-86400000),graceDays:2,suspended:false}],
       [false,{expiresAt:Timestamp.fromMillis(Date.now()-3*86400000),graceDays:1,suspended:false}],
       [false,{expiresAt:Timestamp.fromMillis(Date.now()+86400000),graceDays:0,suspended:true}],
+      [true,{licenseType:'permanent',suspended:false}],
+      [false,{licenseType:'permanent',suspended:true}],
     ]) {
       await testEnv.withSecurityRulesDisabled(c=>setDoc(doc(c.firestore(),'cafe_subscriptions','cafeA'),state));
       await (allowed?assertSucceeds:assertFails)(updateDoc(item,{name:'Allowed description'}));

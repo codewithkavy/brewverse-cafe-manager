@@ -69,6 +69,29 @@ const image = new Uint8Array([137, 80, 78, 71]);
 const jpeg = { contentType: 'image/jpeg' };
 
 describe('BrewVerse test-only tenant Storage rules', () => {
+  it('permanent licenses preserve manager writes, staff restrictions and cross-café isolation', async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      for (const cafeId of ['cafeA', 'cafeB']) {
+        await setDoc(doc(context.firestore(), 'cafe_subscriptions', cafeId), {
+          licenseType: 'permanent', suspended: false,
+        });
+      }
+    });
+    const photo = ref(storageFor('ownerA'), 'cafes/cafeA/products/permanent.jpg');
+    await assertSucceeds(uploadBytes(photo, image, jpeg));
+    await assertSucceeds(uploadBytes(ref(storageFor('managerA'), 'cafes/cafeA/products/manager.jpg'), image, jpeg));
+    await assertSucceeds(getBytes(ref(storageFor('staffA'), 'cafes/cafeA/products/permanent.jpg')));
+    await assertFails(uploadBytes(ref(storageFor('staffA'), 'cafes/cafeA/products/staff.jpg'), image, jpeg));
+    await assertFails(getBytes(ref(storageFor('ownerB'), 'cafes/cafeA/products/permanent.jpg')));
+    await assertFails(uploadBytes(ref(storageFor('ownerB'), 'cafes/cafeA/products/foreign.jpg'), image, jpeg));
+    await testEnv.withSecurityRulesDisabled(context =>
+      setDoc(doc(context.firestore(), 'cafe_subscriptions', 'cafeA'), {
+        licenseType: 'permanent', suspended: true,
+      }));
+    await assertFails(uploadBytes(photo, image, jpeg));
+    await assertSucceeds(getBytes(photo));
+    await assertSucceeds(uploadBytes(ref(storageFor('ownerB'), 'cafes/cafeB/products/still-active.jpg'), image, jpeg));
+  });
   it('subscription expiry and suspension block photo upload/delete but preserve existing image reads',async()=>{
     const photo=ref(storageFor('ownerA'),'cafes/cafeA/products/subscription.jpg');
     await assertSucceeds(uploadBytes(photo,image,jpeg));
@@ -77,6 +100,8 @@ describe('BrewVerse test-only tenant Storage rules', () => {
       [true,{expiresAt:Timestamp.fromMillis(Date.now()-86400000),graceDays:2,suspended:false}],
       [false,{expiresAt:Timestamp.fromMillis(Date.now()-3*86400000),graceDays:1,suspended:false}],
       [false,{expiresAt:Timestamp.fromMillis(Date.now()+86400000),graceDays:0,suspended:true}],
+      [true,{licenseType:'permanent',suspended:false}],
+      [false,{licenseType:'permanent',suspended:true}],
     ]) {
       await testEnv.withSecurityRulesDisabled(c=>setDoc(doc(c.firestore(),'cafe_subscriptions','cafeA'),state));
       await (allowed?assertSucceeds:assertFails)(uploadBytes(photo,image,jpeg));

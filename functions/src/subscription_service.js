@@ -16,6 +16,7 @@ function millis(value) { return value?.toMillis?.() ?? (typeof value === 'string
 function statusOf(subscription, now = new Date()) {
   if (!subscription) return 'pending';
   if (subscription.suspended === true) return 'suspended';
+  if (subscription.licenseType === 'permanent') return 'active';
   const expires = millis(subscription.expiresAt);
   if (!Number.isFinite(expires)) return 'pending';
   if (now.getTime() < expires) return 'active';
@@ -94,7 +95,7 @@ async function details({db, uid, cafeId}) {
 }
 async function updateSubscription({db, uid, cafeId, action, expiresAt, expectedRevision, reason, operationId}) {
   cafeId=id(cafeId); operationId=id(operationId); reason=text(reason,'Reason');
-  if (!['activate','extend','suspend','resume'].includes(action)) fail('invalid-argument','Unknown subscription action.');
+  if (!['activate','activatePermanent','extend','suspend','resume'].includes(action)) fail('invalid-argument','Unknown subscription action.');
   integer(expectedRevision,0,Number.MAX_SAFE_INTEGER,'Revision');
   const requested = ['activate','extend'].includes(action) ? instant(expiresAt) : null;
   if (requested && (requested <= new Date() || requested.getTime() > Date.now()+3660*86400000)) fail('invalid-argument','Expiry must be in the future and within ten years.');
@@ -107,12 +108,14 @@ async function updateSubscription({db, uid, cafeId, action, expiresAt, expectedR
     if(prior.exists) {if(prior.data().fingerprint!==fingerprint)fail('already-exists','Operation ID was reused.');return {duplicate:true};}
     const before=previous.data() ?? {revision:0};
     if ((before.revision??0)!==expectedRevision) fail('aborted','Subscription changed. Refresh before saving.');
+    if (before.licenseType === 'permanent' && ['activate','extend'].includes(action)) fail('failed-precondition','Permanent access cannot be replaced with a timed subscription.');
     if(action==='activate' && Number.isFinite(millis(before.expiresAt)) && requested.getTime()<millis(before.expiresAt)) fail('invalid-argument','Renewal cannot shorten the saved expiry.');
     if(action==='extend' && !Number.isFinite(millis(before.expiresAt))) fail('failed-precondition','Activate the subscription before extending it.');
     if(action==='extend' && requested.getTime()<=millis(before.expiresAt)) fail('invalid-argument','Extension must move the expiry forward.');
     if(action==='resume' && !['active','grace'].includes(statusOf({...before,suspended:false}))) fail('failed-precondition','Renew the expiry before restoring this cafe.');
     const after={...before,revision:expectedRevision+1,updatedAt:FieldValue.serverTimestamp(),updatedBy:uid};
-    if(requested){after.expiresAt=Timestamp.fromDate(requested);after.graceDays=config.data()?.graceDays??0;after.suspended=false;}
+    if(action==='activatePermanent'){after.licenseType='permanent';after.suspended=false;}
+    else if(requested){after.expiresAt=Timestamp.fromDate(requested);after.graceDays=config.data()?.graceDays??0;after.suspended=false;}
     else after.suspended=action==='suspend';
     tx.set(ref,after);
     tx.create(audit,{actorUid:uid,cafeId,action,reason,fingerprint,before,after,createdAt:FieldValue.serverTimestamp()});

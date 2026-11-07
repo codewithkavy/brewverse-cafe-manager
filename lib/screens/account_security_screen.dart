@@ -1,4 +1,5 @@
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../services/authentication_service.dart';
@@ -126,7 +127,9 @@ class _AccountSecurityScreenState extends State<AccountSecurityScreen> {
                     child: const Text('Check email verification')),
               ],
               const SizedBox(height: 20),
-              if (emailAccount && user.phoneNumber == null) ...[
+              if (emailAccount && user.phoneNumber == null && kReleaseMode)
+                const Text('Phone OTP: Available in a future version'),
+              if (emailAccount && user.phoneNumber == null && !kReleaseMode) ...[
                 const Text(
                     'Link your phone to use email or SMS login with the same café access. Verify your email, confirm its password, then enter the SMS code for the number you own. Numbers on another account cannot be linked here.'),
                 const SizedBox(height: 12),

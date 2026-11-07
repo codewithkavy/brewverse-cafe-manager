@@ -1,5 +1,6 @@
 import 'dart:async';
 import '../services/authentication_service.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 
@@ -167,6 +168,10 @@ class _LoginScreenState extends State<LoginScreen> {
   }
 
   Future<void> sendOtp() async {
+    if (kReleaseMode) {
+      _notice('Phone OTP: Available in a future version');
+      return;
+    }
     if (loading || !_resendReady) return;
     final phone =
         phoneController.text.trim().replaceAll(RegExp(r'[\s()-]'), '');
@@ -340,7 +345,7 @@ class _LoginScreenState extends State<LoginScreen> {
                               style: Theme.of(context).textTheme.bodyMedium,
                             ),
                             const SizedBox(height: 22),
-                            if (!_linkingPhone)
+                            if (!_linkingPhone && !kReleaseMode)
                               SegmentedButton<bool>(
                                 segments: const [
                                   ButtonSegment(
@@ -364,6 +369,11 @@ class _LoginScreenState extends State<LoginScreen> {
                                           message = '';
                                         });
                                       },
+                              ),
+                            if (kReleaseMode)
+                              const Text(
+                                'Phone OTP: Available in a future version',
+                                textAlign: TextAlign.center,
                               ),
                             const SizedBox(height: 20),
                             if (!usePhone) ...[

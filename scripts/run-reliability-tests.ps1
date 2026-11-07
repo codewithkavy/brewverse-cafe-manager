@@ -1,3 +1,4 @@
+param([switch]$SecurityVerification)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 Set-Location $root
@@ -29,7 +30,9 @@ try {
   # Expected permission-denied test logs use stderr. PowerShell 5 must not
   # promote those log lines into terminating NativeCommandError exceptions.
   $ErrorActionPreference = 'Continue'
-  firebase emulators:exec --config $file --project brewverse-security-tests --only auth,firestore,functions,storage 'powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-local-backend.ps1 -Reliability -AdminDashboard' 2>&1 | Tee-Object (Join-Path $directory 'tests.log')
+  $testCommand = 'powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-local-backend.ps1 -Reliability -AdminDashboard'
+  if ($SecurityVerification) { $testCommand += ' -SecurityVerification' }
+  firebase emulators:exec --config $file --project brewverse-security-tests --only auth,firestore,functions,storage $testCommand 2>&1 | Tee-Object (Join-Path $directory 'tests.log')
   $result = $LASTEXITCODE
 } finally {
   $env:TEMP = $originalTemp
@@ -42,14 +45,16 @@ try {
       Stop-Process -Id $orphan.ProcessId
     } else { throw 'Unverified process on reliability Firestore port; no process was stopped.' }
   }
-  # Multiple local suites share a project name. Restore only the phone hub's
-  # locator metadata, never export through the Firebase CLI's global locator.
-  $hub = Invoke-RestMethod http://127.0.0.1:4420/ -TimeoutSec 5
-  $worker = Get-CimInstance Win32_Process -Filter "ProcessId = $($hub.pid)"
-  $normalPhone = $worker.CommandLine.Contains((Join-Path $root 'firebase.json')) -and $worker.CommandLine.Contains('brewverse-security-tests')
-  $recoveryPhone = $worker.CommandLine.Contains((Join-Path $root 'scripts/connect-existing-local-firestore.cjs'))
-  if (!$normalPhone -and !$recoveryPhone) { throw 'Phone hub process verification failed.' }
-  $hub | ConvertTo-Json -Depth 10 | Set-Content (Join-Path $env:TEMP 'hub-brewverse-security-tests.json')
+  # The child uses its own TEMP locator. Restore the phone hub's global locator
+  # only when that verified primary hub is actually running.
+  if (Get-NetTCPConnection -State Listen -LocalPort 4420 -ErrorAction SilentlyContinue) {
+    $hub = Invoke-RestMethod http://127.0.0.1:4420/ -TimeoutSec 5
+    $worker = Get-CimInstance Win32_Process -Filter "ProcessId = $($hub.pid)"
+    $normalPhone = $worker.CommandLine.Contains((Join-Path $root 'firebase.json')) -and $worker.CommandLine.Contains('brewverse-security-tests')
+    $recoveryPhone = $worker.CommandLine.Contains((Join-Path $root 'scripts/connect-existing-local-firestore.cjs'))
+    if (!$normalPhone -and !$recoveryPhone) { throw 'Phone hub process verification failed.' }
+    $hub | ConvertTo-Json -Depth 10 | Set-Content (Join-Path $env:TEMP 'hub-brewverse-security-tests.json')
+  }
 }
 Write-Host "Reliability results: $directory"
 exit $result

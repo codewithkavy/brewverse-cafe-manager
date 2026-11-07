@@ -137,7 +137,9 @@ class _DashboardState extends State<Dashboard> {
     final result = await showDialog<Map<String, dynamic>>(
       context: context,
       builder: (_) => EntryDialog(
-        title: '${action[0].toUpperCase()}${action.substring(1)} access',
+        title: action == 'activatePermanent'
+            ? 'Activate permanent café access'
+            : '${action[0].toUpperCase()}${action.substring(1)} access',
         fields: [
           if (action == 'activate' || action == 'extend')
             const EntryField(
@@ -147,7 +149,9 @@ class _DashboardState extends State<Dashboard> {
             ),
           const EntryField('reason', 'Reason / payment reference'),
         ],
-        notice: 'Access changes do not record a payment. Verify payment separately, then choose an explicit expiry.',
+        notice: action == 'activatePermanent'
+            ? 'Permanent access has no expiry. Only a Super Admin can suspend or resume it. This action is audited.'
+            : 'Access changes do not record a payment. Verify payment separately, then choose an explicit expiry.',
       ),
     );
     if (result == null || !mounted) return;
@@ -386,7 +390,7 @@ class _DashboardState extends State<Dashboard> {
                 style: const TextStyle(fontWeight: FontWeight.bold),
               ),
               subtitle: Text(
-                'Owner: ${c['ownerEmail'] ?? c['ownerUid']}\n${c['id']}\nExpiry: ${dateLabel(c['subscription']['expiresAt'])}',
+                'Owner: ${c['ownerEmail'] ?? c['ownerUid']}\n${c['id']}\nLicense: ${c['subscription']['licenseType'] == 'permanent' ? 'Permanent' : dateLabel(c['subscription']['expiresAt'])}',
               ),
               trailing: badge('${c['status']}'),
               onTap: busy ? null : () => open('${c['id']}'),
@@ -424,7 +428,9 @@ class _DashboardState extends State<Dashboard> {
         ),
         badge('${d['status']}'),
         Text(
-          'Expires: ${dateLabel(sub['expiresAt'])} · Grace: ${sub['graceDays'] ?? 0} days',
+          sub['licenseType'] == 'permanent'
+              ? 'License: Permanent (subject to administrator suspension)'
+              : 'Expires: ${dateLabel(sub['expiresAt'])} · Grace: ${sub['graceDays'] ?? 0} days',
         ),
         const SizedBox(height: 20),
         Wrap(
@@ -432,8 +438,12 @@ class _DashboardState extends State<Dashboard> {
           runSpacing: 10,
           children: [
             for (final pair in [
-              ('activate', 'Activate / renew'),
-              ('extend', 'Extend expiry'),
+              if (sub['licenseType'] != 'permanent')
+                ('activatePermanent', 'Activate permanently'),
+              if (sub['licenseType'] != 'permanent') ...[
+                ('activate', 'Activate / renew'),
+                ('extend', 'Extend expiry'),
+              ],
               ('suspend', 'Suspend'),
               ('resume', 'Resume access'),
             ])

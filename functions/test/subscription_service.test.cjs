@@ -10,8 +10,12 @@ let app,db,uid,cafeId,otherId;const run=`admin-${Date.now()}`;
 const future=()=>new Date(Date.now()+30*86400000).toISOString();
 const operation=()=>randomUUID();
 async function reject(promise,code){await assert.rejects(promise,e=>e.code===code);}
+let functionsBaseUrl;
 before(async()=>{
  assert.equal(process.env.GCLOUD_PROJECT,'brewverse-security-tests');assert(['127.0.0.1:13185','127.0.0.1:14185'].includes(process.env.FIRESTORE_EMULATOR_HOST));assert.equal(process.env.FIREBASE_AUTH_EMULATOR_HOST,process.env.FIRESTORE_EMULATOR_HOST.replace('185','198'));
+ functionsBaseUrl=process.env.FIRESTORE_EMULATOR_HOST==='127.0.0.1:14185'
+   ? 'http://127.0.0.1:14101' : 'http://127.0.0.1:13101';
+ assert.equal(process.env.BREWVERSE_FUNCTIONS_TEST_URL ?? functionsBaseUrl,functionsBaseUrl,'Functions test URL must use the matching isolated emulator');
  app=initializeApp({projectId:'brewverse-security-tests'},run);db=getFirestore(app);uid=run+'-root';cafeId=run+'-cafe';otherId=run+'-other';
  await db.collection('platform_admins').doc(uid).set({active:true,role:'super_admin'});
  for(const id of [cafeId,otherId]){await db.collection('cafes').doc(id).set({cafeId:id,name:id,ownerUid:run+'-owner'});await db.collection('cafe_members').doc(`${run}-owner_${id}`).set({uid:run+'-owner',cafeId:id,role:'owner',status:'active'});}
@@ -25,6 +29,9 @@ test('status expires at server time, bounds grace and prioritizes suspension',()
  assert.equal(service.statusOf({expiresAt:Timestamp.fromDate(now),graceDays:1},now),'grace');
  assert.equal(service.statusOf({expiresAt:Timestamp.fromDate(now),graceDays:15},now),'expired');
  assert.equal(service.statusOf({expiresAt:Timestamp.fromDate(new Date('2026-10-23')),suspended:true},now),'suspended');
+ assert.equal(service.statusOf({licenseType:'permanent'},now),'active');
+ assert.equal(service.statusOf({licenseType:'permanent',expiresAt:Timestamp.fromDate(now)},now),'active');
+ assert.equal(service.statusOf({licenseType:'permanent',suspended:true},now),'suspended');
 });
 test('cafe ownership, arbitrary UID and inactive admin do not authorize platform access',async()=>{
  await reject(service.session({db,uid:run+'-owner'}),'permission-denied');
@@ -81,11 +88,29 @@ test('details and paginated list are platform-only and contain payment and audit
  await db.collection('platform_admins').doc(uid).update({active:false});await reject(service.session({db,uid}),'permission-denied');
  await db.collection('platform_admins').doc(uid).update({active:true});
 });
+test('permanent cafe activation is admin-only, revisioned, idempotent and suspendable',async()=>{
+ const activation={db,uid,cafeId:otherId,action:'activatePermanent',expectedRevision:0,reason:'One-time license issued',operationId:operation()};
+ await reject(service.updateSubscription({...activation,uid:run+'-owner'}),'permission-denied');
+ assert.equal((await service.updateSubscription(activation)).revision,1);
+ assert.equal((await service.updateSubscription(activation)).duplicate,true);
+ const licensed=(await db.collection('cafe_subscriptions').doc(otherId).get()).data();
+ assert.equal(licensed.licenseType,'permanent');
+ assert.equal(service.statusOf(licensed),'active');
+ await db.runTransaction(tx=>service.requireCafeSubscriptionTx({transaction:tx,db,cafeId:otherId}));
+ await reject(service.updateSubscription({...activation,operationId:operation()}),'aborted');
+ await reject(service.updateSubscription({...activation,action:'extend',expiresAt:future(),expectedRevision:1,operationId:operation()}),'failed-precondition');
+ await service.updateSubscription({...activation,action:'suspend',expectedRevision:1,operationId:operation()});
+ await reject(db.runTransaction(tx=>service.requireCafeSubscriptionTx({transaction:tx,db,cafeId:otherId})),'failed-precondition');
+ await service.updateSubscription({...activation,action:'resume',expectedRevision:2,operationId:operation()});
+ await db.runTransaction(tx=>service.requireCafeSubscriptionTx({transaction:tx,db,cafeId:otherId}));
+ assert.equal((await db.collection('cafe_subscriptions').doc(otherId).get()).data().licenseType,'permanent');
+ assert.equal((await db.collection('platform_audit').doc(activation.operationId).get()).data().actorUid,uid);
+});
 test('real callable uses the authenticated UID and rejects client role or UID spoofing',async()=>{
  const auth=getAuth(app),password=randomBytes(24).toString('base64url');
  const user=await auth.createUser({email:`${run}@example.test`,password});
  const r=await fetch('http://'+process.env.FIREBASE_AUTH_EMULATOR_HOST+'/identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=local',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:user.email,password,returnSecureToken:true})});const token=(await r.json()).idToken;assert(token);
- const call=()=>fetch(process.env.BREWVERSE_FUNCTIONS_TEST_URL+'/brewverse-security-tests/us-central1/adminOverview',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+token},body:JSON.stringify({data:{uid,role:'super_admin'}})});
+ const call=()=>fetch(functionsBaseUrl+'/brewverse-security-tests/us-central1/adminOverview',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+token},body:JSON.stringify({data:{uid,role:'super_admin'}})});
  assert.equal((await call()).status,403);
  await db.collection('platform_admins').doc(user.uid).set({active:true,role:'super_admin'});
  assert.equal((await call()).status,200);

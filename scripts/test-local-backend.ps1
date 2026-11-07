@@ -1,4 +1,4 @@
-param([switch]$BillHistory, [switch]$FirestoreRulesOnly, [switch]$AdminDashboard, [switch]$SeedAdminDemo, [switch]$AdminDemoOnly, [switch]$Reliability, [switch]$BillingProtection, [switch]$InventoryLoyalty, [switch]$ProductionReadiness, [switch]$CreationRetryOnly)
+param([switch]$BillHistory, [switch]$FirestoreRulesOnly, [switch]$AdminDashboard, [switch]$SeedAdminDemo, [switch]$AdminDemoOnly, [switch]$Reliability, [switch]$BillingProtection, [switch]$InventoryLoyalty, [switch]$ProductionReadiness, [switch]$CreationRetryOnly, [switch]$SecurityVerification)
 $ErrorActionPreference = 'Stop'
 $firestorePort = if ($Reliability) { 14185 } elseif ($BillHistory) { 13185 } else { 8185 }
 $authPort = if ($Reliability) { 14198 } elseif ($BillHistory) { 13198 } else { 9198 }
@@ -11,6 +11,15 @@ if ($env:GCLOUD_PROJECT -ne 'brewverse-security-tests' -or
 }
 $env:BREWVERSE_FUNCTIONS_TEST_URL = if ($Reliability) { 'http://127.0.0.1:14101' } elseif ($BillHistory) { 'http://127.0.0.1:13101' } else { 'http://127.0.0.1:5101' }
 Set-Location (Split-Path $PSScriptRoot -Parent)
+if ($SecurityVerification) {
+  if (!$Reliability -or !$AdminDashboard -or $BillHistory) { throw 'Security verification requires isolated 141xx emulators.' }
+  node --test functions/test/subscription_service.test.cjs
+  if ($LASTEXITCODE) { exit $LASTEXITCODE }
+  npm --prefix security-tests test
+  if ($LASTEXITCODE) { exit $LASTEXITCODE }
+  npm --prefix security-tests run test:storage
+  exit $LASTEXITCODE
+}
 if ($CreationRetryOnly) {
   if (!$BillHistory -or $Reliability) { throw 'Creation retry tests require isolated 131xx services.' }
   node --test --test-name-pattern="cafe creation operation IDs|stock item creation retries" functions/test/membership_service.test.js functions/test/inventory_service.test.js
