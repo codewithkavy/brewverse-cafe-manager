@@ -1,4 +1,5 @@
 const { FieldValue } = require('firebase-admin/firestore');
+const { requireCafeSubscriptionTx } = require('./subscription_service');
 
 const {
   CafeOperationError,
@@ -76,6 +77,7 @@ async function adjustBill({
         refundedMinor: saved.refundedMinor,
       };
     }
+    await requireCafeSubscriptionTx({transaction, db, cafeId});
     const bill = billSnapshot.data();
     if (!billSnapshot.exists || bill.cafeId !== cafeId) {
       throw new CafeOperationError('not-found', 'Bill not found in this café.');

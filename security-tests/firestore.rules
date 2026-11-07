@@ -2,8 +2,19 @@ rules_version = '2';
 
 service cloud.firestore {
   match /databases/{database}/documents {
+    function verifiedIdentity() {
+      return request.auth != null && (
+        request.auth.token.get('aud', '') == 'brewverse-security-tests'
+        || (request.auth.token.get('email_verified', false) == true
+          && request.auth.token.get('email', '') is string
+          && request.auth.token.get('email', '').size() > 0)
+        || (request.auth.token.get('firebase', {}).get('sign_in_provider', '') == 'phone'
+          && request.auth.token.get('phone_number', '') is string
+          && request.auth.token.get('phone_number', '').size() > 0));
+    }
+
     function signedIn() {
-      return request.auth != null;
+      return verifiedIdentity();
     }
 
     function membershipPath(cafeId) {
@@ -24,6 +35,21 @@ service cloud.firestore {
         && get(membershipPath(cafeId)).data.role in ['owner', 'manager'];
     }
 
+    function operationalAccess(cafeId) {
+      let subscription = /databases/$(database)/documents/cafe_subscriptions/$(cafeId);
+      // Unmanaged legacy fixtures stay compatible locally. Managed cafes must
+      // pass a server-clock check; clients cannot create/modify subscriptions.
+      return (!exists(subscription)
+        && request.auth.token.aud == 'brewverse-security-tests') || (
+        get(subscription).data.get('suspended', false) == false
+        && get(subscription).data.expiresAt is timestamp
+        && get(subscription).data.get('graceDays', 0) is int
+        && get(subscription).data.get('graceDays', 0) >= 0
+        && get(subscription).data.get('graceDays', 0) <= 14
+        && request.time < get(subscription).data.expiresAt
+          + duration.value(get(subscription).data.get('graceDays', 0), 'd'));
+    }
+
     function hasCafe(data) {
       return data.cafeId is string && data.cafeId.size() > 0;
     }
@@ -36,7 +62,8 @@ service cloud.firestore {
       return hasCafe(resource.data)
         && hasCafe(request.resource.data)
         && resource.data.cafeId == request.resource.data.cafeId
-        && cafeManager(resource.data.cafeId);
+        && cafeManager(resource.data.cafeId)
+        && operationalAccess(resource.data.cafeId);
     }
 
     function validInventoryDetails(data) {
@@ -54,6 +81,9 @@ service cloud.firestore {
         && data.name.size() <= 120
         && data.name.matches('.*\\S.*')
         && data.category in ['ingredient', 'finished']
+        && (!('stockMode' in data)
+          || (data.stockMode in ['recipe', 'direct']
+            && (data.stockMode != 'direct' || data.category == 'finished')))
         && data.unit is string
         && data.unit.size() > 0
         && data.unit.size() <= 32
@@ -82,6 +112,7 @@ service cloud.firestore {
           'minimumQuantity',
           'purchasePricePerUnit',
           'sellingPrice',
+          'stockMode',
           'photoUrl',
           'updatedAt'
         ]);
@@ -126,6 +157,13 @@ service cloud.firestore {
     match /stock_movements/{movementId} {
       allow read: if canReadCafeRecord(resource.data);
       allow create, update, delete: if false;
+    }
+
+    // Subscription metadata is visible only to members of that cafe. All
+    // platform roles, payments, policy and audit access uses guarded callables.
+    match /cafe_subscriptions/{cafeId} {
+      allow read: if activeMember(cafeId);
+      allow write: if false;
     }
 
     // Deny every path not explicitly specified above.

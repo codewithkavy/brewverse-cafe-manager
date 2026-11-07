@@ -4,7 +4,7 @@ const { deleteApp, initializeApp } = require('firebase-admin/app');
 const { getFirestore } = require('firebase-admin/firestore');
 
 const projectId = 'brewverse-security-tests';
-const functionsHost = 'http://127.0.0.1:5001';
+const functionsHost = process.env.BREWVERSE_FUNCTIONS_TEST_URL || 'http://127.0.0.1:5001';
 let app;
 let db;
 let authToken;
@@ -79,10 +79,15 @@ async function createEmulatorUser(email) {
 }
 
 test('authenticated app calls create a tenant and complete idempotent checkout', async () => {
-  const cafeResult = await callable('createCafe', { name: 'Callable Test Café' });
+  const cafeResult = await callable('createCafe', { name: 'test' });
   assert.equal(cafeResult.response.ok, true, JSON.stringify(cafeResult.result));
   cafeId = cafeResult.result.result.cafeId;
   assert.ok(cafeId);
+  const owner = await db.collection('cafe_members').doc(`${uid}_${cafeId}`).get();
+  assert.equal(owner.data().uid, uid);
+  assert.equal(owner.data().role, 'owner');
+  assert.equal(owner.data().status, 'active');
+  assert.equal((await db.collection('cafes').doc(cafeId).get()).data().ownerUid, uid);
 
   const ingredientResult = await callable('createStockItem', {
     cafeId,
@@ -204,6 +209,52 @@ test('unauthenticated calls are rejected by the callable boundary', async () => 
   const result = await callable('createCafe', { name: 'Must Not Exist' }, null);
   assert.equal(result.response.ok, false);
   assert.equal(result.result.error?.status, 'UNAUTHENTICATED');
+});
+
+test('direct-stock checkout uses authenticated cashier identity and denies another cashier reusing its ID', async () => {
+  const cafe = await callable('createCafe', { name: 'Direct Stock Callable Café' });
+  assert.equal(cafe.response.ok, true, JSON.stringify(cafe.result));
+  const directCafeId = cafe.result.result.cafeId;
+  const cashier = await createEmulatorUser(`${runId}-direct-cashier@example.test`);
+  const grant = await callable('grantCafeMembership', {
+    cafeId: directCafeId, email: cashier.email, role: 'staff',
+  });
+  assert.equal(grant.response.ok, true, JSON.stringify(grant.result));
+  const product = await callable('createStockItem', {
+    cafeId: directCafeId,
+    item: {
+      name: 'Local bottled water', category: 'finished', stockMode: 'direct',
+      unit: 'bottle', quantity: 5, minimumQuantity: 1,
+      purchasePricePerUnit: 10, sellingPrice: 20,
+    },
+  });
+  assert.equal(product.response.ok, true, JSON.stringify(product.result));
+  const productId = product.result.result.stockItemId;
+  const input = {
+    cafeId: directCafeId, checkoutId: `${runId}-direct-stock-bill`,
+    cart: { [productId]: 2 }, orderType: 'takeaway',
+    // Untrusted request identity must never replace the authenticated token.
+    callerUid: uid,
+  };
+  const completed = await callable('checkout', input, cashier.idToken);
+  assert.equal(completed.response.ok, true, JSON.stringify(completed.result));
+  assert.equal(completed.result.result.duplicate, false);
+  const retry = await callable('checkout', input, cashier.idToken);
+  assert.equal(retry.response.ok, true, JSON.stringify(retry.result));
+  assert.equal(retry.result.result.duplicate, true);
+  const otherCashier = await callable('checkout', input);
+  assert.equal(otherCashier.response.ok, false);
+  assert.equal(otherCashier.result.error?.status, 'PERMISSION_DENIED');
+  const bill = (await db.collection('bills').doc(input.checkoutId).get()).data();
+  assert.equal(bill.cashierUid, cashier.localId);
+  assert.equal(bill.total, 40);
+  assert.equal(bill.items[0].quantity, 2);
+  assert.equal((await db.collection('stock_items').doc(productId).get()).data().quantity, 3);
+  assert.equal((await db.collection('product_recipes').doc(productId).get()).exists, false);
+  const billMovements = await db.collection('stock_movements')
+    .where('cafeId', '==', directCafeId).where('billId', '==', input.checkoutId).get();
+  assert.equal(billMovements.size, 1);
+  assert.equal(billMovements.docs[0].data().quantityChange, -2);
 });
 
 test('café owners can manage loyalty policy and managers cannot edit it', async () => {
@@ -407,4 +458,19 @@ test('membership callables enforce role limits and revoked access', async () => 
   }, staffUser.idToken);
   assert.equal(revokedStaffCreate.response.ok, false);
   assert.equal(revokedStaffCreate.result.error?.status, 'PERMISSION_DENIED');
+});
+
+
+test('stale emulator refresh tokens require a fresh sign-in', async () => {
+  const response = await fetch(
+    `http://${process.env.FIREBASE_AUTH_EMULATOR_HOST}/securetoken.googleapis.com/v1/token?key=fake-api-key`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ grant_type: 'refresh_token', refresh_token: 'stale-local-session' }),
+    },
+  );
+  const result = await response.json();
+  assert.equal(response.status, 400);
+  assert.equal(result.error.message, 'INVALID_REFRESH_TOKEN');
 });

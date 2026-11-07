@@ -5,8 +5,11 @@ import '../services/cafe_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/cafe_bottom_navigation.dart';
 import '../widgets/cafe_tab_page_factory.dart';
+import '../widgets/sign_out_button.dart';
 import 'cafe_team_screen.dart';
+import 'account_security_screen.dart';
 import 'loyalty_settings_screen.dart';
+import 'thermal_printer_dialog.dart';
 
 class MoreScreen extends StatelessWidget {
   const MoreScreen({
@@ -24,13 +27,25 @@ class MoreScreen extends StatelessWidget {
   Widget build(BuildContext context) => Theme(
         data: AppTheme.emeraldLight,
         child: Scaffold(
-          appBar: AppBar(title: const Text('More')),
+          appBar: AppBar(
+              title: const Text('More'), actions: const [SignOutButton()]),
           body: Center(
             child: ConstrainedBox(
               constraints: const BoxConstraints(maxWidth: 720),
               child: ListView(
                 padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
                 children: [
+                  _MoreTile(
+                    icon: Icons.manage_accounts_outlined,
+                    title: 'Account settings',
+                    subtitle:
+                        'Email verification, password reset, and linked phone',
+                    onTap: () =>
+                        Navigator.of(context).push(MaterialPageRoute<void>(
+                      builder: (_) => const AccountSecurityScreen(),
+                    )),
+                  ),
+                  const SizedBox(height: 6),
                   _MoreTile(
                     icon: Icons.groups_2_rounded,
                     title: 'Café team',
@@ -67,12 +82,17 @@ class MoreScreen extends StatelessWidget {
                     ),
                   ),
                   const SizedBox(height: 6),
-                  const _MoreTile(
+                  _MoreTile(
                     icon: Icons.print_rounded,
                     title: 'Printer settings',
-                    subtitle:
-                        'Connect a printer from a saved receipt after checkout',
-                    enabled: false,
+                    subtitle: 'Bluetooth printer, paper width, and auto-print',
+                    onTap: () => showDialog<void>(
+                      useRootNavigator: false,
+                      context: context,
+                      builder: (_) => ThermalPrinterDialog.settings(
+                        cafeId: cafeId,
+                      ),
+                    ),
                   ),
                   const SizedBox(height: 6),
                   _MoreTile(

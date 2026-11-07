@@ -49,7 +49,8 @@ void main() {
     await _pumpLoyalty(tester, service: service);
 
     expect(find.text('Find a loyalty member'), findsOneWidget);
-    expect(find.text('Customer list unavailable'), findsOneWidget);
+    expect(find.text('Customer list unavailable'), findsNothing);
+    expect(find.text('Find customers by phone number'), findsOneWidget);
     expect(find.textContaining('points available'), findsNothing);
     expect(service.lookupPhones, isEmpty);
     expect(service.settingsCalls, 0);
@@ -68,7 +69,8 @@ void main() {
     await tester.ensureVisible(find.text('Transactions'));
     await tester.tap(find.text('Transactions'));
     await tester.pumpAndSettle();
-    expect(find.text('Transaction history unavailable'), findsOneWidget);
+    expect(find.text('Transaction history is not included in this build'),
+        findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
@@ -86,6 +88,7 @@ void main() {
     expect(find.text('•••••••••3210'), findsOneWidget);
     expect(find.byTooltip('View customer details'), findsOneWidget);
     expect(find.text('Use phone at checkout'), findsOneWidget);
+    expect(find.text('Customer list unavailable'), findsNothing);
     expect(tester.takeException(), isNull);
   });
 
@@ -202,7 +205,9 @@ void main() {
     await _lookup(tester);
     await tester.tap(find.text('Transactions'));
     await tester.pumpAndSettle();
-    expect(find.text('Transaction history unavailable'), findsOneWidget);
+    expect(find.text('Transaction history is not included in this build'),
+        findsOneWidget);
+    expect(find.text('Transaction history unavailable'), findsNothing);
     expect(find.text('137 points available'), findsNothing);
     await tester.tap(find.text('Customers'));
     await tester.pumpAndSettle();

@@ -39,6 +39,28 @@ async function membership(uid, cafeId) {
   return snapshot.data();
 }
 
+test('cafe creation operation IDs survive concurrent submission and lost-response retry without duplicate owners', async () => {
+  const uid = `creation-owner-${Date.now()}`;
+  const request = { db, uid, name: 'Durable Cafe', operationId: 'create-once' };
+  const results = await Promise.all(Array.from({ length: 4 }, () => createCafe(request)));
+  assert.equal(results.filter(result => !result.duplicate).length, 1);
+  assert.equal(results.filter(result => result.duplicate).length, 3);
+  assert.equal(new Set(results.map(result => result.cafeId)).size, 1);
+  const first = results[0];
+  const cafe = (await db.collection('cafes').doc(first.cafeId).get()).data();
+  const owner = await membership(uid, first.cafeId);
+  assert.equal((await createCafe(request)).duplicate, true);
+  assert.deepEqual((await db.collection('cafes').doc(first.cafeId).get()).data(), cafe);
+  assert.deepEqual(await membership(uid, first.cafeId), owner);
+  assert.equal((await db.collection('cafes').where('ownerUid', '==', uid).get()).size, 1);
+  await assert.rejects(createCafe({ ...request, name: 'Different Cafe' }), error =>
+    error instanceof CafeOperationError && error.code === 'already-exists');
+  await db.collection('cafe_members').doc(first.membershipId).update({ status: 'revoked' });
+  await assert.rejects(createCafe(request), error =>
+    error instanceof CafeOperationError && error.code === 'permission-denied');
+  assert.equal((await db.collection('cafes').where('ownerUid', '==', uid).get()).size, 1);
+});
+
 test('creates café and active owner membership atomically', async () => {
   const created = await makeCafe('owner-create', 'Morning Brew');
   const cafe = await db.collection('cafes').doc(created.cafeId).get();

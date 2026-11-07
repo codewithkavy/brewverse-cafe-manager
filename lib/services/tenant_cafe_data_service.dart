@@ -1,6 +1,8 @@
+import '../firebase_runtime_config.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 
 import '../models/stock_item.dart';
+import 'server_connection.dart';
 
 /// Read-only data access for a single café tenant.
 ///
@@ -12,7 +14,7 @@ class TenantCafeDataService {
     required String cafeId,
     FirebaseFirestore? firestore,
   })  : cafeId = _validateCafeId(cafeId),
-        _db = firestore ?? FirebaseFirestore.instance;
+        _db = firestore ?? BrewVerseFirebaseConfig.firestore;
 
   final String cafeId;
   final FirebaseFirestore _db;
@@ -20,8 +22,12 @@ class TenantCafeDataService {
   Query<Map<String, dynamic>> _tenantQuery(String collection) =>
       _db.collection(collection).where('cafeId', isEqualTo: cafeId);
 
-  Stream<List<StockItem>> watchStock() =>
-      _tenantQuery('stock_items').snapshots().map((snapshot) {
+  Stream<List<StockItem>> watchStock() => _tenantQuery('stock_items')
+          .snapshots(includeMetadataChanges: true)
+          .map((snapshot) {
+        ServerConnection.instance.reportSnapshot(
+            fromCache: snapshot.metadata.isFromCache ||
+                snapshot.metadata.hasPendingWrites);
         final items = snapshot.docs.map(StockItem.fromDoc).toList();
         items.sort((left, right) => left.name.compareTo(right.name));
         return items;

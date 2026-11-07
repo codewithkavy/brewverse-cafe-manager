@@ -1,3 +1,5 @@
+> Historical report retained. Current release configuration and blockers are documented in [ANDROID_RELEASE_GUIDE.md](ANDROID_RELEASE_GUIDE.md) and [PRODUCTION_SECURITY_REVIEW.md](PRODUCTION_SECURITY_REVIEW.md).
+
 # BrewVerse production handoff
 
 Updated: 2026-10-19 (Asia/Kolkata). Work stopped at the user's request after stabilization and handoff. Do not automatically start another task.

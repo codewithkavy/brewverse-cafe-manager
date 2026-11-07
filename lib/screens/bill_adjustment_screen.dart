@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 
 import '../models/cafe_membership.dart';
 import '../services/cafe_functions_service.dart';
+import '../services/server_connection.dart';
 import '../theme/app_theme.dart';
 
 class BillAdjustmentScreen extends StatefulWidget {
@@ -76,7 +77,7 @@ class _BillAdjustmentScreenState extends State<BillAdjustmentScreen> {
   }
 
   Future<void> _adjust({required bool isVoid}) async {
-    if (!_canAdjust || _working) return;
+    if (!_canAdjust || _working || !ServerConnection.instance.canWrite) return;
     final billId = _billId.text.trim();
     if (billId.isEmpty || billId.contains('/')) {
       setState(() => _error = 'Enter a valid bill ID.');
@@ -130,12 +131,17 @@ class _BillAdjustmentScreenState extends State<BillAdjustmentScreen> {
             );
       if (!mounted) return;
       final refundedMinor = result['refundedMinor'];
+      final action = switch (result['status']) {
+        'void' => 'Voided',
+        'refunded' || 'partially_refunded' => 'Refunded',
+        _ => 'Adjusted',
+      };
       setState(() {
         _pendingAdjustmentId = null;
         _pendingAdjustmentKey = null;
         _result = result['duplicate'] == true
             ? 'This adjustment was already applied.'
-            : '${result['status']} · refunded ₹${refundedMinor is int ? (refundedMinor / 100).toStringAsFixed(2) : '0.00'}';
+            : '$action ₹${refundedMinor is int ? (refundedMinor / 100).toStringAsFixed(2) : '0.00'}';
       });
     } catch (error) {
       if (mounted) setState(() => _error = error.toString());
@@ -145,84 +151,91 @@ class _BillAdjustmentScreenState extends State<BillAdjustmentScreen> {
   }
 
   @override
-  Widget build(BuildContext context) => Theme(
-        data: AppTheme.emeraldLight,
-        child: Scaffold(
-          appBar: AppBar(title: const Text('Refund or void bill')),
-          body: ListView(
-            padding: const EdgeInsets.all(20),
-            children: [
-              if (!_canAdjust)
-                const Card(
-                  child: ListTile(
-                    leading: Icon(Icons.lock_outline),
-                    title:
-                        Text('Only café owners and managers can adjust bills.'),
+  Widget build(BuildContext context) => ListenableBuilder(
+        listenable: ServerConnection.instance,
+        builder: (context, _) => Theme(
+          data: AppTheme.emeraldLight,
+          child: Scaffold(
+            appBar: AppBar(title: const Text('Refund or void bill')),
+            body: ListView(
+              padding: const EdgeInsets.all(20),
+              children: [
+                if (!_canAdjust)
+                  const Card(
+                    child: ListTile(
+                      leading: Icon(Icons.lock_outline),
+                      title: Text(
+                          'Only café owners and managers can adjust bills.'),
+                    ),
+                  ),
+                const Text(
+                  'Adjustments are recorded in the café ledger. Refunds reduce recorded revenue. Voids and refunds do not restore prepared stock automatically.',
+                ),
+                const SizedBox(height: 18),
+                TextField(
+                  controller: _billId,
+                  enabled: _canAdjust && !_working,
+                  decoration: const InputDecoration(
+                    labelText: 'Bill ID',
+                    prefixIcon: Icon(Icons.receipt_long_outlined),
                   ),
                 ),
-              const Text(
-                'Adjustments are recorded in the café ledger. Refunds reduce recorded revenue. Voids and refunds do not restore prepared stock automatically.',
-              ),
-              const SizedBox(height: 18),
-              TextField(
-                controller: _billId,
-                enabled: _canAdjust && !_working,
-                decoration: const InputDecoration(
-                  labelText: 'Bill ID',
-                  prefixIcon: Icon(Icons.receipt_long_outlined),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: _amount,
+                  enabled: _canAdjust && !_working,
+                  keyboardType:
+                      const TextInputType.numberWithOptions(decimal: true),
+                  decoration: const InputDecoration(
+                    labelText: 'Refund amount',
+                    prefixText: '₹',
+                  ),
                 ),
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: _amount,
-                enabled: _canAdjust && !_working,
-                keyboardType:
-                    const TextInputType.numberWithOptions(decimal: true),
-                decoration: const InputDecoration(
-                  labelText: 'Refund amount',
-                  prefixText: '₹',
+                const SizedBox(height: 12),
+                TextField(
+                  controller: _reason,
+                  enabled: _canAdjust && !_working,
+                  maxLength: 200,
+                  decoration: const InputDecoration(labelText: 'Reason'),
                 ),
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: _reason,
-                enabled: _canAdjust && !_working,
-                maxLength: 200,
-                decoration: const InputDecoration(labelText: 'Reason'),
-              ),
-              if (_error != null) ...[
-                const SizedBox(height: 8),
-                Text(_error!,
-                    style:
-                        TextStyle(color: Theme.of(context).colorScheme.error)),
+                if (_error != null) ...[
+                  const SizedBox(height: 8),
+                  Text(_error!,
+                      style: TextStyle(
+                          color: Theme.of(context).colorScheme.error)),
+                ],
+                if (_result != null) ...[
+                  const SizedBox(height: 8),
+                  Text(_result!,
+                      style: TextStyle(
+                          color: Theme.of(context).colorScheme.primary)),
+                ],
+                const SizedBox(height: 18),
+                FilledButton.icon(
+                  onPressed: !_canAdjust ||
+                          _working ||
+                          !ServerConnection.instance.canWrite
+                      ? null
+                      : () => _adjust(isVoid: false),
+                  icon: const Icon(Icons.currency_exchange_rounded),
+                  label: const Text('Issue refund'),
+                ),
+                const SizedBox(height: 10),
+                OutlinedButton.icon(
+                  onPressed: !_canAdjust ||
+                          _working ||
+                          !ServerConnection.instance.canWrite
+                      ? null
+                      : () => _adjust(isVoid: true),
+                  icon: const Icon(Icons.cancel_outlined),
+                  label: const Text('Void remaining bill'),
+                ),
+                if (_working) ...[
+                  const SizedBox(height: 16),
+                  const Center(child: CircularProgressIndicator()),
+                ],
               ],
-              if (_result != null) ...[
-                const SizedBox(height: 8),
-                Text(_result!,
-                    style: TextStyle(
-                        color: Theme.of(context).colorScheme.primary)),
-              ],
-              const SizedBox(height: 18),
-              FilledButton.icon(
-                onPressed: !_canAdjust || _working
-                    ? null
-                    : () => _adjust(isVoid: false),
-                icon: const Icon(Icons.currency_exchange_rounded),
-                label: const Text('Issue refund'),
-              ),
-              const SizedBox(height: 10),
-              OutlinedButton.icon(
-                onPressed: !_canAdjust || _working
-                    ? null
-                    : () => _adjust(isVoid: true),
-                icon: const Icon(Icons.cancel_outlined),
-                label: const Text('Void remaining bill'),
-              ),
-              if (_working) ...[
-                const SizedBox(height: 16),
-                const Center(child: CircularProgressIndicator()),
-              ],
-            ],
+            ),
           ),
         ),
       );

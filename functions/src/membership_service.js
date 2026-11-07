@@ -1,3 +1,4 @@
+const { createHash } = require('node:crypto');
 const { FieldPath, FieldValue } = require('firebase-admin/firestore');
 
 const VALID_ROLES = new Set(['owner', 'manager', 'staff']);
@@ -61,7 +62,7 @@ async function requireActiveMembershipTx({
   return membership;
 }
 
-async function createCafe({ db, uid, name }) {
+async function createCafe({ db, uid, name, operationId }) {
   uid = requireText(uid, 'Authenticated user ID');
   name = requireText(name, 'Café name');
   if (name.length < 2 || name.length > 80) {
@@ -71,13 +72,34 @@ async function createCafe({ db, uid, name }) {
     );
   }
 
-  const cafeRef = db.collection('cafes').doc();
+  if (operationId != null) {
+    operationId = requireText(operationId, 'Operation ID');
+    if (operationId.includes('/') || operationId.length > 1500) {
+      throw new CafeOperationError('invalid-argument', 'Operation ID is invalid.');
+    }
+  }
+  const cafeId = operationId == null ? undefined : 'cafe-create-' +
+    createHash('sha256').update(JSON.stringify([uid, operationId])).digest('hex');
+  const cafeRef = cafeId == null ? db.collection('cafes').doc() : db.collection('cafes').doc(cafeId);
   const ownerRef = membershipRef(db, uid, cafeRef.id);
-  await db.runTransaction(async (transaction) => {
+  const duplicate = await db.runTransaction(async (transaction) => {
+    if (operationId != null) {
+      const prior = await transaction.get(cafeRef);
+      if (prior.exists) {
+        await requireActiveMembershipTx({ transaction, db, uid, cafeId: cafeRef.id, roles: ['owner'] });
+        const saved = prior.data();
+        if (saved.ownerUid !== uid || saved.creationOperationId !== operationId ||
+            saved.creationRequestName !== name) {
+          throw new CafeOperationError('already-exists', 'Operation ID was already used for another cafe creation.');
+        }
+        return true;
+      }
+    }
     transaction.create(cafeRef, {
       cafeId: cafeRef.id,
       name,
       ownerUid: uid,
+      ...(operationId == null ? {} : { creationOperationId: operationId, creationRequestName: name }),
       createdAt: FieldValue.serverTimestamp(),
     });
     transaction.create(ownerRef, {
@@ -88,8 +110,9 @@ async function createCafe({ db, uid, name }) {
       createdAt: FieldValue.serverTimestamp(),
       updatedAt: FieldValue.serverTimestamp(),
     });
+    return false;
   });
-  return { cafeId: cafeRef.id, membershipId: ownerRef.id };
+  return { cafeId: cafeRef.id, membershipId: ownerRef.id, duplicate };
 }
 
 async function grantCafeMembership({
@@ -157,6 +180,7 @@ async function grantCafeMembership({
       );
     }
 
+    await require('./subscription_service').requireCafeSubscriptionTx({transaction,db,cafeId});
     transaction.set(targetRef, {
       uid: targetUid,
       cafeId,

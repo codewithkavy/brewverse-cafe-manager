@@ -2,12 +2,23 @@ rules_version = '2';
 
 service firebase.storage {
   match /b/{bucket}/o {
+    function verifiedIdentity() {
+      return request.auth != null && (
+        request.auth.token.get('aud', '') == 'brewverse-security-tests'
+        || (request.auth.token.get('email_verified', false) == true
+          && request.auth.token.get('email', '') is string
+          && request.auth.token.get('email', '').size() > 0)
+        || (request.auth.token.get('firebase', {}).get('sign_in_provider', '') == 'phone'
+          && request.auth.token.get('phone_number', '') is string
+          && request.auth.token.get('phone_number', '').size() > 0));
+    }
+
     function membershipPath(cafeId) {
       return /databases/(default)/documents/cafe_members/$(request.auth.uid + '_' + cafeId);
     }
 
     function activeMember(cafeId) {
-      return request.auth != null
+      return verifiedIdentity()
         && firestore.exists(membershipPath(cafeId))
         && firestore.get(membershipPath(cafeId)).data.uid == request.auth.uid
         && firestore.get(membershipPath(cafeId)).data.cafeId == cafeId
@@ -30,10 +41,25 @@ service firebase.storage {
         ];
     }
 
+    function operationalAccess(cafeId) {
+      let subscription = /databases/(default)/documents/cafe_subscriptions/$(cafeId);
+      // Legacy fixtures are allowed only for tokens issued by the test project.
+      // A commercial project with no subscription always fails closed.
+      return (!firestore.exists(subscription)
+        && request.auth.token.aud == 'brewverse-security-tests') || (
+        firestore.get(subscription).data.get('suspended', false) == false
+        && firestore.get(subscription).data.expiresAt is timestamp
+        && firestore.get(subscription).data.get('graceDays', 0) is int
+        && firestore.get(subscription).data.get('graceDays', 0) >= 0
+        && firestore.get(subscription).data.get('graceDays', 0) <= 14
+        && request.time < firestore.get(subscription).data.expiresAt
+          + duration.value(firestore.get(subscription).data.get('graceDays', 0), 'd'));
+    }
+
     match /cafes/{cafeId}/products/{fileName} {
       allow read: if activeMember(cafeId);
-      allow create, update: if cafeManager(cafeId) && validProductImage();
-      allow delete: if cafeManager(cafeId);
+      allow create, update: if cafeManager(cafeId) && operationalAccess(cafeId) && validProductImage();
+      allow delete: if cafeManager(cafeId) && operationalAccess(cafeId);
     }
 
     // Legacy and unscoped paths are deliberately denied by default.

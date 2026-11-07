@@ -188,7 +188,8 @@ class LoyaltyCustomerDetailsScreen extends StatelessWidget {
                                     crossAxisAlignment:
                                         CrossAxisAlignment.start,
                                     children: [
-                                      Text('Transaction history unavailable',
+                                      Text(
+                                          'Transaction history is not included in this build',
                                           style: TextStyle(
                                               color: AppTheme.ink,
                                               fontSize: 12,

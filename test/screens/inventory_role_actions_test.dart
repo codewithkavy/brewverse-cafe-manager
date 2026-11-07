@@ -295,10 +295,9 @@ void main() {
     await tester.tap(find.byTooltip('Add item'));
     await tester.pumpAndSettle();
     expect(find.text('Add stock item'), findsOneWidget);
-    expect(
-      find.text('Save the item first, then add a photo in Edit item.'),
-      findsOneWidget,
-    );
+    expect(find.byKey(const Key('addItemPhotoTile')), findsOneWidget);
+    expect(find.byKey(const Key('addItemChoosePhoto')), findsOneWidget);
+    expect(find.text('Choose product photo (optional)'), findsOneWidget);
     expect(tester.takeException(), isNull);
     await tester.ensureVisible(find.text('Cancel'));
     await tester.tap(find.text('Cancel'));

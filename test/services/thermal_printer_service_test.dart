@@ -10,6 +10,31 @@ void main() {
   group('ThermalPrinterService.buildReceiptBytes', () {
     final service = ThermalPrinterService();
 
+    test('uses the selected 58 mm or 80 mm paper layout', () async {
+      Future<String> receipt(ReceiptPaperWidth width) async => latin1.decode(
+            await service.buildReceiptBytes(
+              cafeName: 'Cafe',
+              billNumber: 'bill-width',
+              orderType: 'dineIn',
+              items: [
+                {
+                  'name': 'Latte',
+                  'quantity': 1,
+                  'unitPrice': 100,
+                  'lineTotal': 100,
+                },
+              ],
+              total: 100,
+              paperWidth: width,
+            ),
+          );
+      final narrow = await receipt(ReceiptPaperWidth.mm58);
+      final wide = await receipt(ReceiptPaperWidth.mm80);
+      expect(narrow, contains('-' * 32));
+      expect(narrow, isNot(contains('-' * 48)));
+      expect(wide, contains('-' * 48));
+    });
+
     test('builds a receipt containing the saved sale details', () async {
       final bytes = await service.buildReceiptBytes(
         cafeName: 'Midnight Espresso',

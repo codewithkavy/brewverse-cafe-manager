@@ -30,7 +30,8 @@ void main() {
     expect(find.text('•••••••••3210'), findsOneWidget);
     expect(find.text('120'), findsOneWidget);
     expect(find.text('₹120'), findsOneWidget);
-    expect(find.text('Transaction history unavailable'), findsOneWidget);
+    expect(find.text('Transaction history is not included in this build'),
+        findsOneWidget);
     expect(tester.takeException(), isNull);
 
     await tester.ensureVisible(find.text('Earn at checkout'));
@@ -148,11 +149,16 @@ void main() {
     await tester.tap(find.text('Redeem at checkout'));
     await tester.pumpAndSettle();
     expect(checkoutCalls, 1);
-    await tester.ensureVisible(find.text('Transaction history unavailable'));
+    await tester.ensureVisible(
+        find.text('Transaction history is not included in this build'));
     await tester.pumpAndSettle();
-    expect(find.text('Transaction history unavailable').hitTestable(),
+    expect(
+        find
+            .text('Transaction history is not included in this build')
+            .hitTestable(),
         findsOneWidget);
-    expect(find.text('Transaction history unavailable'), findsOneWidget);
+    expect(find.text('Transaction history is not included in this build'),
+        findsOneWidget);
     expect(find.textContaining('points added'), findsNothing);
     expect(find.textContaining('redeemed successfully'), findsNothing);
     expect(tester.takeException(), isNull);

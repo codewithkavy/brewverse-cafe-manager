@@ -79,3 +79,7 @@ build-log.txt
 /how *.gitignore
 
 **/failures/
+
+# Verified APKs and private signing material are distributed outside Git.
+/dist/
+*.dpapi

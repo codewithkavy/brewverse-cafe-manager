@@ -1,3 +1,7 @@
+import '../firebase_runtime_config.dart';
+import 'server_connection.dart';
+import 'stock_operation_store.dart';
+import 'dart:convert';
 import 'package:cloud_functions/cloud_functions.dart';
 
 import '../models/cafe_membership.dart';
@@ -28,14 +32,45 @@ class CafeFunctionsService {
   CafeFunctionsService({
     FirebaseFunctions? functions,
     CafeCallableInvoker? invoker,
+    Future<void> Function()? onlineCheck,
+    StockOperationStore? operationStore,
   })  : _functions = functions,
-        _invoker = invoker;
+        _invoker = invoker,
+        _onlineCheck = onlineCheck,
+        _providedOperationStore = operationStore;
 
   final FirebaseFunctions? _functions;
   final CafeCallableInvoker? _invoker;
+  final Future<void> Function()? _onlineCheck;
+  final StockOperationStore? _providedOperationStore;
+  final _previewOperations = MemoryStockOperationStore();
+
+  Future<Map<String, dynamic>> _createOnce(
+      String name, Map<String, dynamic> data, String resultId) async {
+    final StockOperationStore operations;
+    if (_providedOperationStore != null) {
+      operations = _providedOperationStore;
+    } else if (_invoker != null) {
+      operations = _previewOperations;
+    } else {
+      final uid = BrewVerseFirebaseConfig.auth.currentUser?.uid;
+      if (uid == null) {
+        throw StateError('Sign in before creating a café or inventory item.');
+      }
+      operations =
+          DeviceStockOperationStore(uid: uid, cafeId: 'creation-requests');
+    }
+    final payload = jsonEncode([name, data]);
+    final operationId = await operations.obtain(payload);
+    final result = await _call(name, {...data, 'operationId': operationId});
+    _requiredString(result, resultId);
+    await operations.complete(payload, operationId);
+    return result;
+  }
 
   Future<String> createCafe({required String name}) async {
-    final result = await _call('createCafe', {'name': name});
+    final result =
+        await _createOnce('createCafe', {'name': name.trim()}, 'cafeId');
     return _requiredString(result, 'cafeId');
   }
 
@@ -108,19 +143,23 @@ class CafeFunctionsService {
     required String cafeId,
     required StockItem item,
   }) async {
-    final result = await _call('createStockItem', {
-      'cafeId': cafeId,
-      'item': {
-        'name': item.name,
-        'category': item.category,
-        'unit': item.unit,
-        'quantity': item.quantity,
-        'minimumQuantity': item.minimumQuantity,
-        'purchasePricePerUnit': item.purchasePricePerUnit,
-        'sellingPrice': item.sellingPrice,
-        'photoUrl': item.photoUrl,
-      },
-    });
+    final result = await _createOnce(
+        'createStockItem',
+        {
+          'cafeId': cafeId,
+          'item': {
+            'name': item.name,
+            'category': item.category,
+            'unit': item.unit,
+            'quantity': item.quantity,
+            'minimumQuantity': item.minimumQuantity,
+            'purchasePricePerUnit': item.purchasePricePerUnit,
+            'sellingPrice': item.sellingPrice,
+            'photoUrl': item.photoUrl,
+            'stockMode': item.stockMode,
+          },
+        },
+        'stockItemId');
     return _requiredString(result, 'stockItemId');
   }
 
@@ -129,12 +168,14 @@ class CafeFunctionsService {
     required String stockItemId,
     required double quantity,
     required String reason,
+    String? operationId,
   }) async {
     await _call('addStock', {
       'cafeId': cafeId,
       'stockItemId': stockItemId,
       'quantity': quantity,
       'reason': reason,
+      if (operationId != null) 'operationId': operationId,
     });
   }
 
@@ -258,9 +299,22 @@ class CafeFunctionsService {
     String name,
     Map<String, dynamic> data,
   ) async {
+    const readOnly = {
+      'getSalesSummary',
+      'getLoyaltySettings',
+      'lookupLoyaltyCustomer',
+      'listCafeMemberships'
+    };
+    if (!readOnly.contains(name)) {
+      if (_onlineCheck case final check?) {
+        await check();
+      } else if (_invoker == null) {
+        ServerConnection.instance.requireConfirmedOnline();
+      }
+    }
     final invoker = _invoker;
     if (invoker != null) return invoker(name, data);
-    final functions = _functions ?? FirebaseFunctions.instance;
+    final functions = _functions ?? BrewVerseFirebaseConfig.functions;
     final response =
         await functions.httpsCallable(name).call<Map<String, dynamic>>(data);
     return response.data;

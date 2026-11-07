@@ -1,13 +1,20 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
+import 'dart:async';
+
+import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 
 import '../models/stock_item.dart';
+import '../models/saved_bill.dart';
 import '../models/cafe_membership.dart';
 import '../services/cafe_service.dart';
+import '../services/server_connection.dart';
+import '../services/checkout_recovery_store.dart';
+import '../services/receipt_print_coordinator.dart';
 import '../theme/app_theme.dart';
 import '../widgets/cafe_bottom_navigation.dart';
 import '../widgets/cafe_tab_page_factory.dart';
 import 'home_screen.dart';
+import 'bill_history_screen.dart';
 import 'thermal_printer_dialog.dart';
 
 class BillingScreen extends StatefulWidget {
@@ -18,6 +25,8 @@ class BillingScreen extends StatefulWidget {
     this.initialCustomerPhone,
     this.stockStream,
     this.cafeService,
+    this.recoveryStore,
+    this.receiptPrinter,
   });
 
   final String? cafeId;
@@ -25,15 +34,14 @@ class BillingScreen extends StatefulWidget {
   final String? initialCustomerPhone;
   final Stream<List<StockItem>>? stockStream;
   final CafeService? cafeService;
+  final CheckoutRecoveryStore? recoveryStore;
+  final ReceiptPrintCoordinator? receiptPrinter;
 
   @override
   State<BillingScreen> createState() => _BillingScreenState();
 }
 
 class _BillingScreenState extends State<BillingScreen> {
-  static const Color cardColor = AppTheme.card;
-  static const Color caramel = AppTheme.emerald;
-
   late final CafeService service;
   final Map<String, int> cart = {};
   final TextEditingController _customerPhoneController =
@@ -53,9 +61,48 @@ class _BillingScreenState extends State<BillingScreen> {
   String orderType = 'dineIn';
   bool _checkingOut = false;
 
-  // Keep this ID after a failed request so retrying the same cart
-  // cannot accidentally create a second bill.
-  String? _pendingCheckoutId;
+  late final CheckoutRecoveryStore _recoveryStore;
+  late final ReceiptPrintCoordinator _receiptPrinter;
+  PendingCheckout? _pendingRequest;
+  String? _lastBillId;
+  String? _checkoutNotice;
+  String? _recoveryError;
+  bool _restoringCheckout = true;
+
+  bool get _cartLocked =>
+      _checkingOut ||
+      _restoringCheckout ||
+      _pendingRequest != null ||
+      _recoveryError != null;
+
+  Future<void> _restoreCheckout() async {
+    try {
+      final state = await _recoveryStore.load();
+      if (!mounted) return;
+      setState(() {
+        _pendingRequest = state.pending;
+        _lastBillId = state.lastBillId;
+        if (state.pending case final request?) {
+          cart
+            ..clear()
+            ..addAll(request.cart);
+          orderType = request.orderType;
+          _customerPhoneController.text = request.customerPhone ?? '';
+          _redeemPointsController.text = '${request.redeemPoints}';
+          _checkoutNotice =
+              'An unfinished checkout was recovered. Retry the same order before starting another sale.';
+        }
+        _recoveryError = null;
+      });
+    } catch (_) {
+      if (mounted) {
+        setState(() => _recoveryError =
+            'Checkout recovery could not be read. Retry loading before making a sale.');
+      }
+    } finally {
+      if (mounted) setState(() => _restoringCheckout = false);
+    }
+  }
 
   @override
   void initState() {
@@ -63,6 +110,12 @@ class _BillingScreenState extends State<BillingScreen> {
     service = widget.cafeService ?? CafeService(cafeId: widget.cafeId);
     _stockStream = widget.stockStream ?? service.watchStock();
     _customerPhoneController.text = widget.initialCustomerPhone ?? '';
+    _recoveryStore = widget.recoveryStore ??
+        (widget.cafeId == null
+            ? MemoryCheckoutRecoveryStore()
+            : DeviceCheckoutRecoveryStore(cafeId: widget.cafeId!));
+    _receiptPrinter = widget.receiptPrinter ?? ReceiptPrintCoordinator();
+    unawaited(_restoreCheckout());
   }
 
   @override
@@ -123,16 +176,15 @@ class _BillingScreenState extends State<BillingScreen> {
   }
 
   void _addItem(StockItem item) {
-    if (_checkingOut) return;
+    if (_cartLocked) return;
 
     setState(() {
       cart[item.id] = (cart[item.id] ?? 0) + 1;
-      _pendingCheckoutId = null;
     });
   }
 
   void _removeItem(StockItem item) {
-    if (_checkingOut) return;
+    if (_cartLocked) return;
 
     setState(() {
       final current = cart[item.id] ?? 0;
@@ -142,119 +194,194 @@ class _BillingScreenState extends State<BillingScreen> {
       } else {
         cart[item.id] = current - 1;
       }
-
-      _pendingCheckoutId = null;
     });
   }
 
   Future<void> _checkout() async {
-    if (_checkingOut || cart.isEmpty) return;
-
-    final redeemedPoints =
-        int.tryParse(_redeemPointsController.text.trim()) ?? 0;
-    if (redeemedPoints < 0 ||
-        redeemedPoints > ((_loyaltyCustomer?['pointsBalance'] as int?) ?? 0)) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-            content: Text(
-                'Enter a valid point amount within the customer balance.')),
-      );
+    if (!ServerConnection.instance.canWrite) {
+      setState(
+          () => _checkoutNotice = const OfflineOperationException().toString());
       return;
     }
-
-    final cartSnapshot = Map<String, int>.from(cart);
-    final orderTypeSnapshot = orderType;
-    final customerPhoneSnapshot =
-        _loyaltyCustomer == null ? null : _customerPhoneController.text.trim();
-
+    if (_checkingOut ||
+        _restoringCheckout ||
+        _recoveryError != null ||
+        (cart.isEmpty && _pendingRequest == null)) {
+      return;
+    }
+    final retry = _pendingRequest != null;
+    final redeemedPoints = _pendingRequest?.redeemPoints ??
+        int.tryParse(_redeemPointsController.text.trim()) ??
+        0;
+    if (!retry &&
+        (redeemedPoints < 0 ||
+            redeemedPoints >
+                ((_loyaltyCustomer?['pointsBalance'] as int?) ?? 0))) {
+      setState(() => _checkoutNotice =
+          'Enter a valid point amount within the customer balance.');
+      return;
+    }
+    final request = _pendingRequest ??
+        PendingCheckout(
+          id: PendingCheckout.newId(),
+          cart: Map.of(cart),
+          orderType: orderType,
+          // A phone entered for this sale must survive even without a balance
+          // lookup. The backend validates/enrolls it atomically at checkout.
+          customerPhone: _customerPhoneController.text.trim().isEmpty
+              ? null
+              : _customerPhoneController.text.trim(),
+          redeemPoints: redeemedPoints,
+        );
     setState(() {
       _checkingOut = true;
-      _pendingCheckoutId ??=
-          FirebaseFirestore.instance.collection('bills').doc().id;
+      _checkoutNotice = 'Confirming checkout…';
     });
-
-    final checkoutId = _pendingCheckoutId!;
-
+    if (!retry) {
+      try {
+        // Persist BEFORE sending. A crash or lost reply must reuse this token.
+        await _recoveryStore.save(request);
+        _pendingRequest = request;
+      } catch (_) {
+        if (mounted) {
+          setState(() {
+            _checkingOut = false;
+            _checkoutNotice =
+                'Checkout was not sent: recovery could not be saved on this device. Try again.';
+          });
+        }
+        return;
+      }
+    }
     late final String billId;
     try {
       billId = await service.checkout(
-        checkoutId: checkoutId,
-        cart: cartSnapshot,
-        orderType: orderTypeSnapshot,
-        customerPhone: customerPhoneSnapshot,
-        redeemPoints: redeemedPoints,
+        checkoutId: request.id,
+        cart: request.cart,
+        orderType: request.orderType,
+        customerPhone: request.customerPhone,
+        redeemPoints: request.redeemPoints,
       );
+      if (billId != request.id) {
+        throw const FormatException(
+            'Checkout response does not match its request.');
+      }
     } catch (error) {
+      final code = error is FirebaseException ? error.code : '';
+      final definiteRejection = !retry &&
+          [
+            'failed-precondition',
+            'permission-denied',
+            'unauthenticated',
+            'invalid-argument',
+            'not-found',
+          ].contains(code);
+      if (definiteRejection) {
+        try {
+          await _recoveryStore.reject();
+          _pendingRequest = null;
+        } catch (_) {
+          /* Keep the request locked when recovery cannot be updated. */
+        }
+      }
       if (!mounted) return;
-
       setState(() {
         _checkingOut = false;
+        _checkoutNotice = code == 'permission-denied' ||
+                code == 'unauthenticated'
+            ? 'Checkout access denied. Ask the café owner to verify your active membership. ${_pendingRequest != null ? 'The pending order is retained; retry it after access is restored.' : 'This request was rejected.'}'
+            : code == 'failed-precondition'
+                ? '${error is FirebaseException ? error.message ?? 'Stock is unavailable.' : 'Stock is unavailable.'} ${_pendingRequest != null ? 'Retry the same pending order.' : 'No sale was completed for this request.'}'
+                : 'Checkout is not confirmed. The order is locked. Retry this same checkout to check its result; do not create a replacement sale.';
       });
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          backgroundColor: Colors.red.shade900,
-          content: Text(
-            'Checkout failed. No successful bill was confirmed.\n$error',
-          ),
-          duration: const Duration(seconds: 6),
-        ),
-      );
       return;
     }
 
-    if (!mounted) return;
-    setState(() {
-      cart.clear();
-      _pendingCheckoutId = null;
-      _checkingOut = false;
-      _loyaltyCustomer = null;
-      _customerPhoneController.clear();
-      _redeemPointsController.text = '0';
-    });
+    _lastBillId = billId;
+    var recoveryCleared = false;
+    try {
+      await _recoveryStore.confirm(billId);
+      _pendingRequest = null;
+      recoveryCleared = true;
+    } catch (_) {
+      /* Server success is never undone by a local storage failure. */
+    }
+    if (mounted) {
+      setState(() {
+        _checkingOut = false;
+        if (recoveryCleared) {
+          cart.clear();
+          _loyaltyCustomer = null;
+          _customerPhoneController.clear();
+          _redeemPointsController.text = '0';
+        }
+        _checkoutNotice = recoveryCleared
+            ? 'Bill saved successfully! Bill ID: $billId'
+            : 'Bill $billId is confirmed. Local recovery could not be updated; retry the same request safely.';
+      });
+    }
 
     Map<String, dynamic>? savedBill;
     try {
       savedBill = await service.loadBill(billId);
+    } catch (_) {}
+    var cafeName = 'BREWVERSE CAFE';
+    try {
+      cafeName = await service.loadCafeName() ?? cafeName;
+    } catch (_) {}
+    // Printing errors never return to checkout or submit another purchase.
+    ReceiptPrintResult? printResult;
+    try {
+      printResult = await _receiptPrinter.autoPrint(
+        cafeId: widget.cafeId,
+        billId: billId,
+        cafeName: cafeName,
+        loadBill: () => savedBill == null
+            ? service.loadBill(billId)
+            : Future.value(savedBill),
+      );
     } catch (_) {
-      // Checkout is already committed; receipt lookup must not report it failed.
+      /* An unexpected printer error cannot reverse a committed sale. */
     }
     if (!mounted) return;
-    final rawItems = savedBill?['items'];
-    final receiptItems = rawItems is List
-        ? rawItems
-            .whereType<Map>()
-            .map((item) => Map<String, dynamic>.from(item))
-            .toList(growable: false)
-        : const <Map<String, dynamic>>[];
-    final rawTotal = savedBill?['total'];
-    final receiptTotal = rawTotal is num ? rawTotal.toDouble() : null;
-    final rawDiscount = savedBill?['discount'];
-    final receiptDiscount = rawDiscount is num ? rawDiscount.toDouble() : 0.0;
-    final receiptAvailable = receiptItems.isNotEmpty &&
-        receiptTotal != null &&
-        receiptTotal.isFinite;
+    setState(() {
+      final savedMessage = _checkoutMessage(billId, savedBill);
+      _checkoutNotice = !recoveryCleared
+          ? _checkoutNotice
+          : printResult?.status == ReceiptPrintStatus.failed ||
+                  printResult?.status == ReceiptPrintStatus.unavailable
+              ? '$savedMessage. Receipt not confirmed; use Print last receipt to retry printing only.'
+              : savedMessage;
+    });
+  }
 
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        backgroundColor: cardColor,
-        content: Text(_checkoutMessage(billId, savedBill)),
-        duration: const Duration(seconds: 7),
-        action: receiptAvailable
-            ? SnackBarAction(
-                label: 'PRINT RECEIPT',
-                textColor: caramel,
-                onPressed: () => _openPrinterDialog(
-                  billId: billId,
-                  orderType: orderTypeSnapshot,
-                  items: receiptItems,
-                  total: receiptTotal,
-                  discount: receiptDiscount,
-                ),
-              )
-            : null,
-      ),
-    );
+  Future<void> _printLastReceipt() async {
+    final billId = _lastBillId;
+    if (billId == null || _checkingOut) return;
+    try {
+      final bill = await service.loadBill(billId);
+      if (bill == null ||
+          bill['items'] is! List ||
+          bill['total'] is! num ||
+          bill['orderType'] is! String) {
+        throw StateError('Saved receipt unavailable.');
+      }
+      if (!mounted) return;
+      await _openPrinterDialog(
+          billId: billId,
+          savedReceipt: SavedBill(billId, bill),
+          orderType: bill['orderType'] as String,
+          items: (bill['items'] as List)
+              .map((line) => Map<String, dynamic>.from(line as Map))
+              .toList(),
+          total: (bill['total'] as num).toDouble(),
+          discount: (bill['discount'] as num?)?.toDouble() ?? 0);
+    } catch (_) {
+      if (mounted) {
+        setState(() => _checkoutNotice =
+            'The sale remains saved. Could not load its receipt; try Print last receipt again.');
+      }
+    }
   }
 
   String _checkoutMessage(String billId, Map<String, dynamic>? savedBill) {
@@ -274,7 +401,7 @@ class _BillingScreenState extends State<BillingScreen> {
   }
 
   Future<void> _lookupLoyaltyCustomer() async {
-    if (widget.cafeId == null || _lookingUpCustomer || _checkingOut) return;
+    if (widget.cafeId == null || _lookingUpCustomer || _cartLocked) return;
     final phone = _customerPhoneController.text.trim();
     if (phone.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -285,7 +412,6 @@ class _BillingScreenState extends State<BillingScreen> {
     setState(() {
       _lookingUpCustomer = true;
       _loyaltyCustomer = null;
-      _pendingCheckoutId = null;
     });
     try {
       final customer = await service.lookupLoyaltyCustomer(phoneNumber: phone);
@@ -300,7 +426,7 @@ class _BillingScreenState extends State<BillingScreen> {
         SnackBar(
           content: Text(customer['found'] == true
               ? 'Customer found · ${customer['pointsBalance']} points available.'
-              : 'New loyalty customer · points will be earned on this sale.'),
+              : 'New customer will be saved after successful checkout. Points follow café settings.'),
         ),
       );
     } catch (error) {
@@ -315,25 +441,25 @@ class _BillingScreenState extends State<BillingScreen> {
 
   Future<void> _openPrinterDialog({
     required String billId,
+    SavedBill? savedReceipt,
     required String orderType,
     required List<Map<String, dynamic>> items,
     required double total,
     required double discount,
   }) async {
     if (!mounted) return;
-    var cafeName = 'BREWVERSE CAFE';
-    try {
-      cafeName = await service.loadCafeName() ?? cafeName;
-    } catch (_) {
-      // Printing remains available if café profile lookup is unavailable.
-    }
+    final cafeName = savedReceipt?.text('cafeName') ?? 'BREWVERSE CAFE';
     if (!mounted) return;
     showDialog<void>(
       useRootNavigator: false,
       context: context,
       builder: (_) => ThermalPrinterDialog(
         cafeName: cafeName,
+        cafeId: widget.cafeId,
         billNumber: billId,
+        isReprint: true,
+        issuedAt: savedReceipt?.createdAt,
+        transactionStatus: savedReceipt?.text('status'),
         orderType: orderType,
         items: items,
         total: total,
@@ -343,269 +469,330 @@ class _BillingScreenState extends State<BillingScreen> {
   }
 
   @override
-  Widget build(BuildContext context) => Theme(
-        data: AppTheme.emeraldLight,
-        child: Scaffold(
-          backgroundColor: AppTheme.paper,
-          appBar: AppBar(
-            toolbarHeight: 52,
-            leadingWidth: 42,
-            leading: IconButton(
-              tooltip: MaterialLocalizations.of(context).backButtonTooltip,
-              onPressed: _goBack,
-              icon: const Icon(Icons.arrow_back_rounded, size: 21),
-            ),
-            titleSpacing: 0,
-            title: const Text('Create Bill',
-                style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
-            actions: [
-              IconButton(
-                tooltip: 'View current bill',
-                onPressed: _showCart,
-                icon: const Icon(Icons.receipt_long_outlined, size: 22),
-              ),
-              const SizedBox(width: 4),
-            ],
-          ),
-          body: Center(
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 1040),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(12, 6, 12, 4),
-                    child: TextField(
-                      controller: _searchController,
-                      onChanged: (value) =>
-                          setState(() => _searchQuery = value),
-                      style: const TextStyle(fontSize: 13, color: AppTheme.ink),
-                      decoration: InputDecoration(
-                        hintText: 'Search products...',
-                        prefixIcon: const Icon(Icons.search_rounded, size: 19),
-                        isDense: true,
-                        contentPadding: const EdgeInsets.symmetric(
-                            horizontal: 12, vertical: 12),
-                        suffixIcon: _searchQuery.isEmpty
-                            ? null
-                            : IconButton(
-                                tooltip: 'Clear search',
-                                onPressed: () {
-                                  _searchController.clear();
-                                  setState(() => _searchQuery = '');
-                                },
-                                icon: const Icon(Icons.close_rounded, size: 18),
-                              ),
-                        fillColor: const Color(0xFFEEEDE6),
-                        enabledBorder: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(24),
-                          borderSide: BorderSide.none,
-                        ),
-                      ),
+  Widget build(BuildContext context) => ListenableBuilder(
+        listenable: ServerConnection.instance,
+        builder: (context, _) => PopScope(
+          canPop: !_checkingOut,
+          child: Theme(
+            data: AppTheme.emeraldLight,
+            child: Scaffold(
+              backgroundColor: AppTheme.paper,
+              appBar: AppBar(
+                toolbarHeight: 52,
+                leadingWidth: 42,
+                leading: IconButton(
+                  tooltip: MaterialLocalizations.of(context).backButtonTooltip,
+                  onPressed: _goBack,
+                  icon: const Icon(Icons.arrow_back_rounded, size: 21),
+                ),
+                titleSpacing: 0,
+                title: const Text('Create Bill',
+                    style:
+                        TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
+                actions: [
+                  if (widget.cafeId != null)
+                    IconButton(
+                      tooltip: 'Bill History',
+                      onPressed: () =>
+                          Navigator.of(context).push(MaterialPageRoute<void>(
+                        builder: (_) =>
+                            BillHistoryScreen(cafeId: widget.cafeId!),
+                      )),
+                      icon: const Icon(Icons.history_rounded, size: 22),
                     ),
+                  IconButton(
+                    tooltip: 'View current bill',
+                    onPressed: _showCart,
+                    icon: const Icon(Icons.receipt_long_outlined, size: 22),
                   ),
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 12),
-                    child: SingleChildScrollView(
-                      scrollDirection: Axis.horizontal,
-                      child: Row(
-                        children: [
-                          _menuFilter('All products', !_inOrderOnly,
-                              () => setState(() => _inOrderOnly = false)),
-                          const SizedBox(width: 7),
-                          _menuFilter('In order', _inOrderOnly,
-                              () => setState(() => _inOrderOnly = true)),
-                        ],
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 6),
-                  Expanded(
-                    child: StreamBuilder<List<StockItem>>(
-                      stream: _stockStream,
-                      builder: (context, snapshot) {
-                        if (snapshot.hasError) {
-                          return _menuState(
-                            Icons.cloud_off_outlined,
-                            'Menu unavailable',
-                            'Could not load inventory.\n${snapshot.error}',
-                          );
-                        }
-                        if (!snapshot.hasData) {
-                          return const Center(
-                            child: CircularProgressIndicator(),
-                          );
-                        }
-                        _products = snapshot.data!
-                            .where((item) => item.category == 'finished')
-                            .toList();
-                        final existingIds =
-                            _products.map((item) => item.id).toSet();
-                        // Keep in-flight checkout cart intact.
-                        if (!_checkingOut) {
-                          cart.removeWhere(
-                              (id, _) => !existingIds.contains(id));
-                        }
-                        if (_products.isEmpty) {
-                          return _menuState(
-                            Icons.local_cafe_outlined,
-                            'Your menu starts here',
-                            'No finished products yet. Add your products in Inventory to create a bill.',
-                            action: TextButton.icon(
-                              onPressed: () => _selectTab(1),
-                              icon: const Icon(Icons.inventory_2_outlined,
-                                  size: 17),
-                              label: const Text('Open Inventory'),
-                            ),
-                          );
-                        }
-                        final visibleProducts = _products
-                            .where((item) =>
-                                item.name.toLowerCase().contains(
-                                    _searchQuery.trim().toLowerCase()) &&
-                                (!_inOrderOnly || cart.containsKey(item.id)))
-                            .toList(growable: false);
-                        if (visibleProducts.isEmpty) {
-                          return _menuState(
-                            Icons.search_off_rounded,
-                            _inOrderOnly && cart.isEmpty
-                                ? 'Your order is empty'
-                                : 'No matching products',
-                            _inOrderOnly && cart.isEmpty
-                                ? 'Choose All products to start your order.'
-                                : 'Try another search or choose All products.',
-                          );
-                        }
-                        return LayoutBuilder(
-                          builder: (context, constraints) {
-                            final largeText =
-                                MediaQuery.textScalerOf(context).scale(13) > 17;
-                            final columns = constraints.maxWidth >= 900
-                                ? 5
-                                : constraints.maxWidth >= 620
-                                    ? 4
-                                    : constraints.maxWidth >= 278 && !largeText
-                                        ? 3
-                                        : 2;
-                            final width = (constraints.maxWidth -
-                                    24 -
-                                    8 * (columns - 1)) /
-                                columns;
-                            final textScale =
-                                MediaQuery.textScalerOf(context).scale(13) / 13;
-                            return GridView.builder(
-                              key: const ValueKey('billing-product-grid'),
-                              padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
-                              gridDelegate:
-                                  SliverGridDelegateWithFixedCrossAxisCount(
-                                crossAxisCount: columns,
-                                crossAxisSpacing: 8,
-                                mainAxisSpacing: 8,
-                                mainAxisExtent:
-                                    width * 0.88 + 72 * textScale.clamp(1, 2),
-                              ),
-                              itemCount: visibleProducts.length,
-                              itemBuilder: (context, index) =>
-                                  _productCard(visibleProducts[index]),
-                            );
-                          },
-                        );
-                      },
-                    ),
-                  ),
+                  const SizedBox(width: 4),
                 ],
               ),
-            ),
-          ),
-          bottomNavigationBar: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              SafeArea(
-                top: false,
-                bottom: false,
-                child: Center(
-                  child: ConstrainedBox(
-                    constraints: const BoxConstraints(maxWidth: 1040),
-                    child: Padding(
-                      padding: const EdgeInsets.fromLTRB(12, 5, 12, 6),
-                      child: Material(
-                        color: AppTheme.card,
-                        borderRadius: BorderRadius.circular(19),
-                        child: InkWell(
-                          onTap: _showCart,
-                          borderRadius: BorderRadius.circular(19),
-                          child: Padding(
-                            padding: const EdgeInsets.all(9),
-                            child: Row(
+              body: Center(
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 1040),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(12, 6, 12, 4),
+                        child: TextField(
+                          controller: _searchController,
+                          onChanged: (value) =>
+                              setState(() => _searchQuery = value),
+                          style: const TextStyle(
+                              fontSize: 13, color: AppTheme.ink),
+                          decoration: InputDecoration(
+                            hintText: 'Search products...',
+                            prefixIcon:
+                                const Icon(Icons.search_rounded, size: 19),
+                            isDense: true,
+                            contentPadding: const EdgeInsets.symmetric(
+                                horizontal: 12, vertical: 12),
+                            suffixIcon: _searchQuery.isEmpty
+                                ? null
+                                : IconButton(
+                                    tooltip: 'Clear search',
+                                    onPressed: () {
+                                      _searchController.clear();
+                                      setState(() => _searchQuery = '');
+                                    },
+                                    icon: const Icon(Icons.close_rounded,
+                                        size: 18),
+                                  ),
+                            fillColor: const Color(0xFFEEEDE6),
+                            enabledBorder: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(24),
+                              borderSide: BorderSide.none,
+                            ),
+                          ),
+                        ),
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 12),
+                        child: SingleChildScrollView(
+                          scrollDirection: Axis.horizontal,
+                          child: Row(
+                            children: [
+                              _menuFilter('All products', !_inOrderOnly,
+                                  () => setState(() => _inOrderOnly = false)),
+                              const SizedBox(width: 7),
+                              _menuFilter('In order', _inOrderOnly,
+                                  () => setState(() => _inOrderOnly = true)),
+                            ],
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      if (_checkoutNotice != null ||
+                          _recoveryError != null ||
+                          _lastBillId != null)
+                        Padding(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 16, vertical: 4),
+                          child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                Container(
-                                  height: 44,
-                                  width: 44,
-                                  decoration: BoxDecoration(
-                                    color: AppTheme.emerald,
-                                    borderRadius: BorderRadius.circular(13),
-                                  ),
-                                  child: const Icon(
-                                      Icons.shopping_cart_outlined,
-                                      color: Colors.white,
-                                      size: 22),
+                                if (_checkoutNotice != null ||
+                                    _recoveryError != null)
+                                  Text(_recoveryError ?? _checkoutNotice!,
+                                      style: const TextStyle(fontSize: 12)),
+                                Wrap(spacing: 8, children: [
+                                  if (_pendingRequest != null)
+                                    TextButton(
+                                        onPressed:
+                                            _checkingOut ? null : _checkout,
+                                        child: Text(_checkingOut
+                                            ? 'Confirming…'
+                                            : 'Retry same checkout')),
+                                  if (_recoveryError != null)
+                                    TextButton(
+                                        onPressed: _restoreCheckout,
+                                        child: const Text('Retry recovery')),
+                                  if (_lastBillId != null)
+                                    TextButton(
+                                        onPressed: _checkingOut
+                                            ? null
+                                            : _printLastReceipt,
+                                        child:
+                                            const Text('Print last receipt')),
+                                ]),
+                              ]),
+                        ),
+                      Expanded(
+                        child: StreamBuilder<List<StockItem>>(
+                          stream: _stockStream,
+                          builder: (context, snapshot) {
+                            if (snapshot.hasError) {
+                              return _menuState(
+                                Icons.cloud_off_outlined,
+                                'Menu unavailable',
+                                'Could not load inventory.\n${snapshot.error}',
+                              );
+                            }
+                            if (!snapshot.hasData) {
+                              return const Center(
+                                child: CircularProgressIndicator(),
+                              );
+                            }
+                            _products = snapshot.data!
+                                .where((item) => item.category == 'finished')
+                                .toList();
+                            final existingIds =
+                                _products.map((item) => item.id).toSet();
+                            // Keep in-flight checkout cart intact.
+                            if (!_cartLocked) {
+                              cart.removeWhere(
+                                  (id, _) => !existingIds.contains(id));
+                            }
+                            if (_products.isEmpty) {
+                              return _menuState(
+                                Icons.local_cafe_outlined,
+                                'Your menu starts here',
+                                'No finished products yet. Add your products in Inventory to create a bill.',
+                                action: TextButton.icon(
+                                  onPressed: () => _selectTab(1),
+                                  icon: const Icon(Icons.inventory_2_outlined,
+                                      size: 17),
+                                  label: const Text('Open Inventory'),
                                 ),
-                                const SizedBox(width: 12),
-                                Expanded(
-                                  child: Column(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      Text(
-                                        '$itemCount item${itemCount == 1 ? '' : 's'}',
-                                        style: const TextStyle(
-                                            color: AppTheme.mutedInk,
-                                            fontSize: 11),
+                              );
+                            }
+                            final visibleProducts = _products
+                                .where((item) =>
+                                    item.name.toLowerCase().contains(
+                                        _searchQuery.trim().toLowerCase()) &&
+                                    (!_inOrderOnly ||
+                                        cart.containsKey(item.id)))
+                                .toList(growable: false);
+                            if (visibleProducts.isEmpty) {
+                              return _menuState(
+                                Icons.search_off_rounded,
+                                _inOrderOnly && cart.isEmpty
+                                    ? 'Your order is empty'
+                                    : 'No matching products',
+                                _inOrderOnly && cart.isEmpty
+                                    ? 'Choose All products to start your order.'
+                                    : 'Try another search or choose All products.',
+                              );
+                            }
+                            return LayoutBuilder(
+                              builder: (context, constraints) {
+                                final largeText =
+                                    MediaQuery.textScalerOf(context).scale(13) >
+                                        17;
+                                final columns = constraints.maxWidth >= 900
+                                    ? 5
+                                    : constraints.maxWidth >= 620
+                                        ? 4
+                                        : constraints.maxWidth >= 278 &&
+                                                !largeText
+                                            ? 3
+                                            : 2;
+                                final width = (constraints.maxWidth -
+                                        24 -
+                                        8 * (columns - 1)) /
+                                    columns;
+                                final textScale =
+                                    MediaQuery.textScalerOf(context).scale(13) /
+                                        13;
+                                return GridView.builder(
+                                  key: const ValueKey('billing-product-grid'),
+                                  padding:
+                                      const EdgeInsets.fromLTRB(12, 0, 12, 12),
+                                  gridDelegate:
+                                      SliverGridDelegateWithFixedCrossAxisCount(
+                                    crossAxisCount: columns,
+                                    crossAxisSpacing: 8,
+                                    mainAxisSpacing: 8,
+                                    mainAxisExtent: width * 0.88 +
+                                        72 * textScale.clamp(1, 2),
+                                  ),
+                                  itemCount: visibleProducts.length,
+                                  itemBuilder: (context, index) =>
+                                      _productCard(visibleProducts[index]),
+                                );
+                              },
+                            );
+                          },
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              bottomNavigationBar: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  SafeArea(
+                    top: false,
+                    bottom: false,
+                    child: Center(
+                      child: ConstrainedBox(
+                        constraints: const BoxConstraints(maxWidth: 1040),
+                        child: Padding(
+                          padding: const EdgeInsets.fromLTRB(12, 5, 12, 6),
+                          child: Material(
+                            color: AppTheme.card,
+                            borderRadius: BorderRadius.circular(19),
+                            child: InkWell(
+                              onTap: _showCart,
+                              borderRadius: BorderRadius.circular(19),
+                              child: Padding(
+                                padding: const EdgeInsets.all(9),
+                                child: Row(
+                                  children: [
+                                    Container(
+                                      height: 44,
+                                      width: 44,
+                                      decoration: BoxDecoration(
+                                        color: AppTheme.emerald,
+                                        borderRadius: BorderRadius.circular(13),
                                       ),
-                                      FittedBox(
-                                        fit: BoxFit.scaleDown,
-                                        alignment: Alignment.centerLeft,
-                                        child: Text(
-                                          '₹${(_estimatedNetPaise / 100).toStringAsFixed(2)}',
-                                          style: const TextStyle(
-                                            color: AppTheme.ink,
-                                            fontSize: 20,
-                                            fontWeight: FontWeight.w800,
+                                      child: const Icon(
+                                          Icons.shopping_cart_outlined,
+                                          color: Colors.white,
+                                          size: 22),
+                                    ),
+                                    const SizedBox(width: 12),
+                                    Expanded(
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          Text(
+                                            '$itemCount item${itemCount == 1 ? '' : 's'}',
+                                            style: const TextStyle(
+                                                color: AppTheme.mutedInk,
+                                                fontSize: 11),
                                           ),
-                                        ),
+                                          FittedBox(
+                                            fit: BoxFit.scaleDown,
+                                            alignment: Alignment.centerLeft,
+                                            child: Text(
+                                              '₹${(_estimatedNetPaise / 100).toStringAsFixed(2)}',
+                                              style: const TextStyle(
+                                                color: AppTheme.ink,
+                                                fontSize: 20,
+                                                fontWeight: FontWeight.w800,
+                                              ),
+                                            ),
+                                          ),
+                                        ],
                                       ),
-                                    ],
-                                  ),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    IconButton(
+                                      tooltip: 'Review order',
+                                      onPressed: _showCart,
+                                      style: IconButton.styleFrom(
+                                        backgroundColor: AppTheme.orange,
+                                        foregroundColor: AppTheme.forest,
+                                        minimumSize: const Size(48, 48),
+                                        shape: RoundedRectangleBorder(
+                                            borderRadius:
+                                                BorderRadius.circular(14)),
+                                      ),
+                                      icon: const Icon(
+                                          Icons.arrow_forward_rounded),
+                                    ),
+                                  ],
                                 ),
-                                const SizedBox(width: 8),
-                                IconButton(
-                                  tooltip: 'Review order',
-                                  onPressed: _showCart,
-                                  style: IconButton.styleFrom(
-                                    backgroundColor: AppTheme.orange,
-                                    foregroundColor: AppTheme.forest,
-                                    minimumSize: const Size(48, 48),
-                                    shape: RoundedRectangleBorder(
-                                        borderRadius:
-                                            BorderRadius.circular(14)),
-                                  ),
-                                  icon: const Icon(Icons.arrow_forward_rounded),
-                                ),
-                              ],
+                              ),
                             ),
                           ),
                         ),
                       ),
                     ),
                   ),
-                ),
+                  CafeBottomNavigation(
+                    selectedIndex: 2,
+                    onDestinationSelected: _selectTab,
+                  ),
+                ],
               ),
-              CafeBottomNavigation(
-                selectedIndex: 2,
-                onDestinationSelected: _selectTab,
-              ),
-            ],
+            ),
           ),
         ),
       );
@@ -699,14 +886,14 @@ class _BillingScreenState extends State<BillingScreen> {
         : '₹${(price / 100).toStringAsFixed(2)}';
     return Semantics(
       button: true,
-      enabled: !_checkingOut,
+      enabled: !_cartLocked,
       excludeSemantics: true,
       label:
           'Add ${item.name}, $priceLabel${quantity > 0 ? ', $quantity in order' : ''}',
-      onTap: _checkingOut ? null : () => _addItem(item),
+      onTap: _cartLocked ? null : () => _addItem(item),
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
-        onTap: _checkingOut ? null : () => _addItem(item),
+        onTap: _cartLocked ? null : () => _addItem(item),
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 180),
           decoration: BoxDecoration(
@@ -785,7 +972,7 @@ class _BillingScreenState extends State<BillingScreen> {
                       height: 38,
                       child: IconButton(
                         tooltip: 'Add ${item.name}',
-                        onPressed: _checkingOut ? null : () => _addItem(item),
+                        onPressed: _cartLocked ? null : () => _addItem(item),
                         padding: const EdgeInsets.all(5),
                         icon: Container(
                           width: 24,
@@ -817,194 +1004,202 @@ class _BillingScreenState extends State<BillingScreen> {
         borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
       ),
       clipBehavior: Clip.antiAlias,
-      builder: (sheetContext) => Theme(
-        data: AppTheme.emeraldLight,
-        child: SafeArea(
-          top: false,
-          child: FractionallySizedBox(
-            heightFactor: 1,
-            alignment: Alignment.bottomCenter,
-            child: StatefulBuilder(
-              builder: (context, setSheetState) => Column(
-                children: [
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(5, 7, 12, 7),
-                    child: Row(
-                      children: [
-                        IconButton(
-                          tooltip: 'Continue shopping',
-                          onPressed: () => Navigator.pop(sheetContext),
-                          icon: const Icon(Icons.arrow_back_rounded,
-                              color: Colors.white, size: 21),
-                        ),
-                        const Expanded(
-                          child: Text('Your order',
-                              style: TextStyle(
-                                  color: Colors.white,
-                                  fontSize: 18,
-                                  fontWeight: FontWeight.w700)),
-                        ),
-                        Text('$itemCount item${itemCount == 1 ? '' : 's'}',
-                            style: const TextStyle(
-                                color: Colors.white70, fontSize: 12)),
-                      ],
-                    ),
-                  ),
-                  Expanded(
-                    child: Container(
-                      decoration: const BoxDecoration(
-                        color: AppTheme.card,
-                        borderRadius:
-                            BorderRadius.vertical(top: Radius.circular(24)),
-                      ),
-                      child: Column(
+      builder: (sheetContext) => ListenableBuilder(
+        listenable: ServerConnection.instance,
+        builder: (context, _) => Theme(
+          data: AppTheme.emeraldLight,
+          child: SafeArea(
+            top: false,
+            child: FractionallySizedBox(
+              heightFactor: 1,
+              alignment: Alignment.bottomCenter,
+              child: StatefulBuilder(
+                builder: (context, setSheetState) => Column(
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(5, 7, 12, 7),
+                      child: Row(
                         children: [
-                          Expanded(
-                            child: ListView(
-                              padding:
-                                  const EdgeInsets.fromLTRB(14, 16, 14, 10),
-                              children: [
-                                if (cart.isEmpty)
-                                  Padding(
-                                    padding: const EdgeInsets.symmetric(
-                                        vertical: 28),
-                                    child: _menuState(
-                                      Icons.shopping_bag_outlined,
-                                      'Your order is empty',
-                                      'Add a product to start this bill.',
-                                    ),
-                                  )
-                                else
-                                  for (final entry in cart.entries)
-                                    if (_findProduct(entry.key)
-                                        case final item?)
-                                      _cartItem(
-                                          item, entry.value, setSheetState),
-                                const SizedBox(height: 16),
-                                const Text('Order type',
-                                    style: TextStyle(
-                                        color: AppTheme.ink,
-                                        fontSize: 13,
-                                        fontWeight: FontWeight.w700)),
-                                const SizedBox(height: 9),
-                                SegmentedButton<String>(
-                                  showSelectedIcon: false,
-                                  style: SegmentedButton.styleFrom(
-                                    visualDensity: VisualDensity.compact,
-                                    textStyle: const TextStyle(fontSize: 12),
-                                  ),
-                                  segments: const [
-                                    ButtonSegment(
-                                        value: 'dineIn',
-                                        label: Text('Dine-in'),
-                                        icon: Icon(Icons.restaurant_outlined,
-                                            size: 17)),
-                                    ButtonSegment(
-                                        value: 'takeaway',
-                                        label: Text('Takeaway'),
-                                        icon: Icon(
-                                            Icons.takeout_dining_outlined,
-                                            size: 17)),
-                                  ],
-                                  selected: {orderType},
-                                  onSelectionChanged: _checkingOut
-                                      ? null
-                                      : (selection) {
-                                          setState(() {
-                                            orderType = selection.first;
-                                            _pendingCheckoutId = null;
-                                          });
-                                          setSheetState(() {});
-                                        },
-                                ),
-                                if (widget.cafeId != null) ...[
-                                  const SizedBox(height: 18),
-                                  _loyaltyControls(sheetContext, setSheetState),
-                                ],
-                                const SizedBox(height: 22),
-                                _cartAmountRow('Subtotal', _totalPaise),
-                                if (_estimatedLoyaltyDiscountPaise > 0) ...[
-                                  const SizedBox(height: 10),
-                                  _cartAmountRow('Loyalty discount',
-                                      -_estimatedLoyaltyDiscountPaise,
-                                      color: AppTheme.emerald),
-                                ],
-                                const SizedBox(height: 10),
-                                const Divider(color: AppTheme.line),
-                              ],
-                            ),
+                          IconButton(
+                            tooltip: 'Continue shopping',
+                            onPressed: () => Navigator.pop(sheetContext),
+                            icon: const Icon(Icons.arrow_back_rounded,
+                                color: Colors.white, size: 21),
                           ),
-                          Padding(
-                            padding: EdgeInsets.fromLTRB(16, 10, 16,
-                                10 + MediaQuery.viewInsetsOf(context).bottom),
-                            child: Column(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Row(
-                                  children: [
-                                    const Expanded(
-                                      child: Text('Total',
-                                          style: TextStyle(
-                                              color: AppTheme.ink,
-                                              fontSize: 16,
-                                              fontWeight: FontWeight.w700)),
-                                    ),
-                                    Flexible(
-                                      child: Align(
-                                        alignment: Alignment.centerRight,
-                                        child: FittedBox(
-                                          fit: BoxFit.scaleDown,
-                                          child: Text(
-                                            '₹${(_estimatedNetPaise / 100).toStringAsFixed(2)}',
-                                            style: const TextStyle(
-                                                color: AppTheme.ink,
-                                                fontSize: 24,
-                                                fontWeight: FontWeight.w800),
-                                          ),
-                                        ),
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                                const SizedBox(height: 14),
-                                SizedBox(
-                                  width: double.infinity,
-                                  child: ElevatedButton(
-                                    onPressed: cart.isEmpty || _checkingOut
-                                        ? null
-                                        : () {
-                                            Navigator.pop(sheetContext);
-                                            _checkout();
-                                          },
-                                    child: const Row(
-                                      mainAxisAlignment:
-                                          MainAxisAlignment.center,
-                                      children: [
-                                        Flexible(
-                                            child: Text('Complete checkout')),
-                                        SizedBox(width: 8),
-                                        Icon(Icons.arrow_forward_rounded,
-                                            size: 18),
-                                      ],
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            ),
+                          const Expanded(
+                            child: Text('Your order',
+                                style: TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 18,
+                                    fontWeight: FontWeight.w700)),
                           ),
+                          Text('$itemCount item${itemCount == 1 ? '' : 's'}',
+                              style: const TextStyle(
+                                  color: Colors.white70, fontSize: 12)),
                         ],
                       ),
                     ),
-                  ),
-                  if (MediaQuery.viewInsetsOf(context).bottom == 0)
-                    CafeBottomNavigation(
-                      selectedIndex: 2,
-                      onDestinationSelected: (index) {
-                        Navigator.pop(sheetContext);
-                        _selectTab(index);
-                      },
+                    Expanded(
+                      child: Container(
+                        decoration: const BoxDecoration(
+                          color: AppTheme.card,
+                          borderRadius:
+                              BorderRadius.vertical(top: Radius.circular(24)),
+                        ),
+                        child: Column(
+                          children: [
+                            Expanded(
+                              child: ListView(
+                                padding:
+                                    const EdgeInsets.fromLTRB(14, 16, 14, 10),
+                                children: [
+                                  if (cart.isEmpty)
+                                    Padding(
+                                      padding: const EdgeInsets.symmetric(
+                                          vertical: 28),
+                                      child: _menuState(
+                                        Icons.shopping_bag_outlined,
+                                        'Your order is empty',
+                                        'Add a product to start this bill.',
+                                      ),
+                                    )
+                                  else
+                                    for (final entry in cart.entries)
+                                      if (_findProduct(entry.key)
+                                          case final item?)
+                                        _cartItem(
+                                            item, entry.value, setSheetState),
+                                  const SizedBox(height: 16),
+                                  const Text('Order type',
+                                      style: TextStyle(
+                                          color: AppTheme.ink,
+                                          fontSize: 13,
+                                          fontWeight: FontWeight.w700)),
+                                  const SizedBox(height: 9),
+                                  SegmentedButton<String>(
+                                    showSelectedIcon: false,
+                                    style: SegmentedButton.styleFrom(
+                                      visualDensity: VisualDensity.compact,
+                                      textStyle: const TextStyle(fontSize: 12),
+                                    ),
+                                    segments: const [
+                                      ButtonSegment(
+                                          value: 'dineIn',
+                                          label: Text('Dine-in'),
+                                          icon: Icon(Icons.restaurant_outlined,
+                                              size: 17)),
+                                      ButtonSegment(
+                                          value: 'takeaway',
+                                          label: Text('Takeaway'),
+                                          icon: Icon(
+                                              Icons.takeout_dining_outlined,
+                                              size: 17)),
+                                    ],
+                                    selected: {orderType},
+                                    onSelectionChanged: _cartLocked
+                                        ? null
+                                        : (selection) {
+                                            setState(() {
+                                              orderType = selection.first;
+                                            });
+                                            setSheetState(() {});
+                                          },
+                                  ),
+                                  if (widget.cafeId != null) ...[
+                                    const SizedBox(height: 18),
+                                    _loyaltyControls(
+                                        sheetContext, setSheetState),
+                                  ],
+                                  const SizedBox(height: 22),
+                                  _cartAmountRow('Subtotal', _totalPaise),
+                                  if (_estimatedLoyaltyDiscountPaise > 0) ...[
+                                    const SizedBox(height: 10),
+                                    _cartAmountRow('Loyalty discount',
+                                        -_estimatedLoyaltyDiscountPaise,
+                                        color: AppTheme.emerald),
+                                  ],
+                                  const SizedBox(height: 10),
+                                  const Divider(color: AppTheme.line),
+                                ],
+                              ),
+                            ),
+                            Padding(
+                              padding: EdgeInsets.fromLTRB(16, 10, 16,
+                                  10 + MediaQuery.viewInsetsOf(context).bottom),
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Row(
+                                    children: [
+                                      const Expanded(
+                                        child: Text('Total',
+                                            style: TextStyle(
+                                                color: AppTheme.ink,
+                                                fontSize: 16,
+                                                fontWeight: FontWeight.w700)),
+                                      ),
+                                      Flexible(
+                                        child: Align(
+                                          alignment: Alignment.centerRight,
+                                          child: FittedBox(
+                                            fit: BoxFit.scaleDown,
+                                            child: Text(
+                                              '₹${(_estimatedNetPaise / 100).toStringAsFixed(2)}',
+                                              style: const TextStyle(
+                                                  color: AppTheme.ink,
+                                                  fontSize: 24,
+                                                  fontWeight: FontWeight.w800),
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                  const SizedBox(height: 14),
+                                  SizedBox(
+                                    width: double.infinity,
+                                    child: ElevatedButton(
+                                      onPressed:
+                                          !ServerConnection.instance.canWrite ||
+                                                  cart.isEmpty ||
+                                                  _checkingOut ||
+                                                  _restoringCheckout ||
+                                                  _recoveryError != null
+                                              ? null
+                                              : () {
+                                                  Navigator.pop(sheetContext);
+                                                  _checkout();
+                                                },
+                                      child: const Row(
+                                        mainAxisAlignment:
+                                            MainAxisAlignment.center,
+                                        children: [
+                                          Flexible(
+                                              child: Text('Complete checkout')),
+                                          SizedBox(width: 8),
+                                          Icon(Icons.arrow_forward_rounded,
+                                              size: 18),
+                                        ],
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
                     ),
-                ],
+                    if (MediaQuery.viewInsetsOf(context).bottom == 0)
+                      CafeBottomNavigation(
+                        selectedIndex: 2,
+                        onDestinationSelected: (index) {
+                          Navigator.pop(sheetContext);
+                          _selectTab(index);
+                        },
+                      ),
+                  ],
+                ),
               ),
             ),
           ),
@@ -1056,7 +1251,7 @@ class _BillingScreenState extends State<BillingScreen> {
                         padding: EdgeInsets.zero,
                         constraints:
                             const BoxConstraints(minWidth: 32, minHeight: 40),
-                        onPressed: _checkingOut
+                        onPressed: _cartLocked
                             ? null
                             : () {
                                 _removeItem(item);
@@ -1073,7 +1268,7 @@ class _BillingScreenState extends State<BillingScreen> {
                         padding: EdgeInsets.zero,
                         constraints:
                             const BoxConstraints(minWidth: 32, minHeight: 40),
-                        onPressed: _checkingOut
+                        onPressed: _cartLocked
                             ? null
                             : () {
                                 _addItem(item);
@@ -1103,7 +1298,7 @@ class _BillingScreenState extends State<BillingScreen> {
           const SizedBox(height: 9),
           TextField(
             controller: _customerPhoneController,
-            enabled: !_checkingOut && !_lookingUpCustomer,
+            enabled: !_cartLocked && !_lookingUpCustomer,
             keyboardType: TextInputType.phone,
             style: const TextStyle(color: AppTheme.ink, fontSize: 13),
             decoration: const InputDecoration(
@@ -1115,7 +1310,6 @@ class _BillingScreenState extends State<BillingScreen> {
               setState(() {
                 _loyaltyCustomer = null;
                 _loyaltySettings = null;
-                _pendingCheckoutId = null;
                 _redeemPointsController.text = '0';
               });
               setSheetState(() {});
@@ -1125,7 +1319,7 @@ class _BillingScreenState extends State<BillingScreen> {
           Align(
             alignment: Alignment.centerRight,
             child: TextButton.icon(
-              onPressed: _checkingOut || _lookingUpCustomer
+              onPressed: _cartLocked || _lookingUpCustomer
                   ? null
                   : () async {
                       final lookup = _lookupLoyaltyCustomer();
@@ -1148,7 +1342,7 @@ class _BillingScreenState extends State<BillingScreen> {
             const SizedBox(height: 10),
             TextField(
               controller: _redeemPointsController,
-              enabled: !_checkingOut,
+              enabled: !_cartLocked,
               keyboardType: TextInputType.number,
               style: const TextStyle(color: AppTheme.ink),
               onChanged: (_) {
@@ -1190,6 +1384,7 @@ class _BillingScreenState extends State<BillingScreen> {
       );
 
   void _goBack() {
+    if (_checkingOut) return;
     final navigator = Navigator.of(context);
     if (navigator.canPop()) {
       navigator.pop();
@@ -1199,6 +1394,7 @@ class _BillingScreenState extends State<BillingScreen> {
   }
 
   void _selectTab(int index) {
+    if (_checkingOut) return;
     if (index == 2) return;
     final navigator = Navigator.of(context);
     if (!navigator.canPop()) {

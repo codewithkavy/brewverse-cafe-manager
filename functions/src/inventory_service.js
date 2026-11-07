@@ -1,4 +1,6 @@
+const { createHash } = require('node:crypto');
 const { FieldValue, Timestamp } = require('firebase-admin/firestore');
+const { requireCafeSubscriptionTx } = require('./subscription_service');
 
 const {
   CafeOperationError,
@@ -60,6 +62,19 @@ function currencyMinorUnits(value, label) {
   return Math.round(scaled);
 }
 
+function normalizeStockMode(value, category, code = 'invalid-argument') {
+  // Existing inventory has no stockMode and continues to require its recipe.
+  const stockMode = value ?? 'recipe';
+  if (!['recipe', 'direct'].includes(stockMode) ||
+      (stockMode === 'direct' && category !== 'finished')) {
+    throw new CafeOperationError(
+      code,
+      'Stock mode must be recipe, or direct for a finished product.',
+    );
+  }
+  return stockMode;
+}
+
 function normalizeStockItem(input) {
   if (input == null || typeof input !== 'object' || Array.isArray(input)) {
     throw new CafeOperationError('invalid-argument', 'Stock item is required.');
@@ -72,6 +87,7 @@ function normalizeStockItem(input) {
       'Item category must be ingredient or finished.',
     );
   }
+  const stockMode = normalizeStockMode(input.stockMode, category);
   const unit = requiredText(input.unit, 'Unit');
   const quantity = finiteNonNegative(input.quantity, 'Quantity');
   const minimumQuantity = finiteNonNegative(
@@ -87,6 +103,7 @@ function normalizeStockItem(input) {
   return {
     name,
     category,
+    stockMode,
     unit,
     quantity,
     minimumQuantity,
@@ -114,13 +131,17 @@ function validateRecipeLines(lines, label, allowEmpty) {
   });
 }
 
-async function createStockItem({ db, callerUid, cafeId, item }) {
+async function createStockItem({ db, callerUid, cafeId, item, operationId }) {
   callerUid = requireDocumentId(callerUid, 'Authenticated user ID');
   cafeId = requireDocumentId(cafeId, 'Café ID');
   const normalized = normalizeStockItem(item);
-  const stockRef = db.collection('stock_items').doc();
+  operationId = operationId == null ? null : requireDocumentId(operationId, 'Operation ID');
+  const stockItemId = operationId == null ? undefined : 'stock-create-' +
+    createHash('sha256').update(JSON.stringify([cafeId, operationId])).digest('hex');
+  const stockRef = stockItemId == null ? db.collection('stock_items').doc() : db.collection('stock_items').doc(stockItemId);
+  const creationRequestKey = JSON.stringify(normalized);
 
-  await db.runTransaction(async (transaction) => {
+  const duplicate = await db.runTransaction(async (transaction) => {
     await requireActiveMembershipTx({
       transaction,
       db,
@@ -129,14 +150,28 @@ async function createStockItem({ db, callerUid, cafeId, item }) {
       roles: MANAGER_ROLES,
     });
 
+    if (operationId != null) {
+      const prior = await transaction.get(stockRef);
+      if (prior.exists) {
+        const saved = prior.data();
+        if (saved.cafeId !== cafeId || saved.creationActorUid !== callerUid ||
+            saved.creationOperationId !== operationId || saved.creationRequestKey !== creationRequestKey) {
+          throw new CafeOperationError('already-exists', 'Operation ID was already used for another stock item creation.');
+        }
+        return true;
+      }
+    }
+    await requireCafeSubscriptionTx({transaction, db, cafeId});
     transaction.create(stockRef, {
       ...normalized,
       cafeId,
+      ...(operationId == null ? {} : { creationOperationId: operationId, creationActorUid: callerUid, creationRequestKey }),
       createdAt: FieldValue.serverTimestamp(),
       updatedAt: FieldValue.serverTimestamp(),
     });
     if (normalized.quantity > 0) {
-      const movementRef = db.collection('stock_movements').doc();
+      const movementRef = operationId == null ? db.collection('stock_movements').doc()
+        : db.collection('stock_movements').doc('opening-' + stockRef.id);
       transaction.create(movementRef, {
         cafeId,
         stockItemId: stockRef.id,
@@ -149,11 +184,12 @@ async function createStockItem({ db, callerUid, cafeId, item }) {
         createdAt: FieldValue.serverTimestamp(),
       });
     }
+    return false;
   });
-  return { stockItemId: stockRef.id };
+  return { stockItemId: stockRef.id, duplicate };
 }
 
-async function addStock({ db, callerUid, cafeId, stockItemId, quantity, reason }) {
+async function addStock({ db, callerUid, cafeId, stockItemId, quantity, reason, operationId }) {
   callerUid = requireDocumentId(callerUid, 'Authenticated user ID');
   cafeId = requireDocumentId(cafeId, 'Café ID');
   stockItemId = requireDocumentId(stockItemId, 'Stock item ID');
@@ -162,9 +198,14 @@ async function addStock({ db, callerUid, cafeId, stockItemId, quantity, reason }
     ? reason.trim().slice(0, 160)
     : 'Stock addition';
   const stockRef = db.collection('stock_items').doc(stockItemId);
-  const movementRef = db.collection('stock_movements').doc();
+  operationId = operationId == null ? null : requireDocumentId(operationId, 'Operation ID');
+  const movementId = operationId == null ? undefined : 'stock-add-' +
+    createHash('sha256').update(JSON.stringify([cafeId, operationId])).digest('hex');
+  const movementRef = movementId == null
+    ? db.collection('stock_movements').doc()
+    : db.collection('stock_movements').doc(movementId);
 
-  await db.runTransaction(async (transaction) => {
+  const result = await db.runTransaction(async (transaction) => {
     await requireActiveMembershipTx({
       transaction,
       db,
@@ -172,6 +213,20 @@ async function addStock({ db, callerUid, cafeId, stockItemId, quantity, reason }
       cafeId,
       roles: MANAGER_ROLES,
     });
+    if (operationId != null) {
+      const prior = await transaction.get(movementRef);
+      if (prior.exists) {
+        const saved = prior.data();
+        if (saved.cafeId !== cafeId || saved.stockItemId !== stockItemId ||
+            saved.createdBy !== callerUid || saved.operationId !== operationId ||
+            saved.type !== 'addition' || saved.quantityChange !== quantity ||
+            saved.reason !== reason) {
+          throw new CafeOperationError('already-exists', 'Operation ID was already used for another stock addition.');
+        }
+        return { duplicate: true, quantityAfter: saved.quantityAfter };
+      }
+    }
+    await requireCafeSubscriptionTx({transaction, db, cafeId});
     const itemSnapshot = await transaction.get(stockRef);
     const item = itemSnapshot.data();
     if (!itemSnapshot.exists || item.cafeId !== cafeId) {
@@ -196,10 +251,12 @@ async function addStock({ db, callerUid, cafeId, stockItemId, quantity, reason }
       quantityChange: quantity,
       quantityAfter: updatedQuantity,
       reason,
+      ...(operationId == null ? {} : { operationId, createdBy: callerUid }),
       createdAt: FieldValue.serverTimestamp(),
     });
+    return { duplicate: false, quantityAfter: updatedQuantity };
   });
-  return { stockItemId, quantityAdded: quantity };
+  return { stockItemId, quantityAdded: quantity, movementId: movementRef.id, ...result };
 }
 
 async function saveRecipe({
@@ -230,6 +287,7 @@ async function saveRecipe({
       cafeId,
       roles: MANAGER_ROLES,
     });
+    await requireCafeSubscriptionTx({transaction, db, cafeId});
     const productSnapshot = await transaction.get(productRef);
     const product = productSnapshot.data();
     if (!productSnapshot.exists || product.cafeId !== cafeId) {
@@ -239,6 +297,12 @@ async function saveRecipe({
       throw new CafeOperationError(
         'failed-precondition',
         'Recipes can only be assigned to finished products.',
+      );
+    }
+    if (normalizeStockMode(product.stockMode, product.category, 'failed-precondition') === 'direct') {
+      throw new CafeOperationError(
+        'failed-precondition',
+        'Choose recipe stock mode before assigning a recipe.',
       );
     }
 
@@ -253,7 +317,7 @@ async function saveRecipe({
           `Recipe references an unavailable stock item: ${snapshot.id}`,
         );
       }
-      if (stockItem.category === 'finished') {
+      if (stockItem.category !== 'ingredient') {
         throw new CafeOperationError(
           'failed-precondition',
           'Recipe ingredients and packaging must not be finished products.',
@@ -293,6 +357,9 @@ function normalizeCart(cart) {
     }
     return { productId, quantity };
   });
+  if (new Set(normalized.map(({ productId }) => productId)).size !== normalized.length) {
+    throw new CafeOperationError('invalid-argument', 'Cart contains duplicate product IDs.');
+  }
   normalized.sort((left, right) => left.productId.localeCompare(right.productId));
   return normalized;
 }
@@ -377,6 +444,14 @@ async function checkout({
           'Checkout ID belongs to another café.',
         );
       }
+      if (existingBill.cashierUid != null && existingBill.cashierUid !== callerUid) {
+        throw new CafeOperationError(
+          'permission-denied',
+          'Checkout ID belongs to another cashier.',
+        );
+      }
+      // Bills saved before cashierUid was introduced retain matching-order
+      // retries for active members of the original cafe. No new writes occur.
       if (existingBill.requestKey !== requestKey) {
         throw new CafeOperationError(
           'already-exists',
@@ -386,17 +461,13 @@ async function checkout({
       return { billId: billRef.id, duplicate: true };
     }
 
+    await requireCafeSubscriptionTx({transaction, db, cafeId});
     const productSnapshots = new Map();
     const recipeSnapshots = new Map();
     for (const { productId } of entries) {
       const productRef = db.collection('stock_items').doc(productId);
-      const recipeRef = db.collection('product_recipes').doc(productId);
-      const [productSnapshot, recipeSnapshot] = await Promise.all([
-        transaction.get(productRef),
-        transaction.get(recipeRef),
-      ]);
+      const productSnapshot = await transaction.get(productRef);
       const product = productSnapshot.data();
-      const recipe = recipeSnapshot.data();
       if (!productSnapshot.exists || product.cafeId !== cafeId) {
         throw new CafeOperationError('not-found', 'Product not found in this café.');
       }
@@ -406,18 +477,29 @@ async function checkout({
           'Only finished products can be sold.',
         );
       }
-      if (!recipeSnapshot.exists || recipe.cafeId !== cafeId ||
-          recipe.productId !== productId) {
-        throw new CafeOperationError(
-          'failed-precondition',
-          `No valid recipe configured for ${product.name ?? productId}.`,
+      const stockMode = normalizeStockMode(
+        product.stockMode, product.category, 'failed-precondition',
+      );
+      if (stockMode === 'recipe') {
+        const recipeSnapshot = await transaction.get(
+          db.collection('product_recipes').doc(productId),
         );
+        const recipe = recipeSnapshot.data();
+        if (!recipeSnapshot.exists || recipe.cafeId !== cafeId ||
+            recipe.productId !== productId) {
+          throw new CafeOperationError(
+            'failed-precondition',
+            `No valid recipe configured for ${product.name ?? productId}.`,
+          );
+        }
+        recipeSnapshots.set(productId, recipe);
       }
-      productSnapshots.set(productId, product);
-      recipeSnapshots.set(productId, recipe);
+      productSnapshots.set(productId, { ...product, stockMode });
     }
 
     const requiredStock = new Map();
+    const recipeStockIds = new Set();
+    const directStockIds = new Set();
     const billItems = [];
     for (const { productId, quantity } of entries) {
       const product = productSnapshots.get(productId);
@@ -432,12 +514,19 @@ async function checkout({
       }
       const unitPrice = unitPriceMinor / 100;
       const lineTotal = lineTotalMinor / 100;
-      const ingredients = validateRecipeLines(recipe.ingredients, 'Ingredients', false);
-      const packaging = orderType === 'takeaway'
-        ? validateRecipeLines(recipe.packaging ?? [], 'Packaging', true)
-        : [];
-      for (const line of ingredients) addRequirement(requiredStock, line, quantity);
-      for (const line of packaging) addRequirement(requiredStock, line, quantity);
+      if (product.stockMode === 'direct') {
+        directStockIds.add(productId);
+        addRequirement(requiredStock, { stockItemId: productId, quantity: 1 }, quantity);
+      } else {
+        const ingredients = validateRecipeLines(recipe.ingredients, 'Ingredients', false);
+        const packaging = orderType === 'takeaway'
+          ? validateRecipeLines(recipe.packaging ?? [], 'Packaging', true)
+          : [];
+        for (const line of [...ingredients, ...packaging]) {
+          recipeStockIds.add(line.stockItemId);
+          addRequirement(requiredStock, line, quantity);
+        }
+      }
       billItems.push({
         productId,
         name: product.name ?? 'Unnamed product',
@@ -469,7 +558,10 @@ async function checkout({
           `Required stock item is unavailable: ${stockItemId}`,
         );
       }
-      if (stockItem.category === 'finished') {
+      if ((recipeStockIds.has(stockItemId) && stockItem.category !== 'ingredient') ||
+          (stockItem.category !== 'ingredient' &&
+           !(directStockIds.has(stockItemId) && stockItem.category === 'finished' &&
+             stockItem.stockMode === 'direct'))) {
         throw new CafeOperationError(
           'failed-precondition',
           'A recipe cannot deduct another finished product.',
@@ -477,14 +569,21 @@ async function checkout({
       }
       const current = finiteNonNegative(stockItem.quantity, 'Current stock');
       const needed = requiredStock.get(stockItemId);
-      if (current < needed) {
+      // Decimal recipes such as 0.1 * 3 can differ from saved 0.3 by a few
+      // floating-point bits. Accept only that rounding scale, capped at 1e-9
+      // stock units, and clamp the rounded remainder so it never goes negative.
+      const roundingTolerance = Math.min(
+        1e-9, Number.EPSILON * Math.max(current, needed) * 8,
+      );
+      const remaining = current - needed;
+      if (remaining < -roundingTolerance) {
         throw new CafeOperationError(
           'failed-precondition',
           `Insufficient stock for ${stockItem.name ?? stockItemId}.`,
         );
       }
       stockSnapshots.set(stockItemId, stockItem);
-      updatedQuantities.set(stockItemId, current - needed);
+      updatedQuantities.set(stockItemId, Math.max(0, remaining));
     }
 
     const totalMinor = billItems.reduce((sum, item) => {
@@ -531,12 +630,15 @@ async function checkout({
     transaction.create(billRef, {
       cafeId,
       billId: billRef.id,
+      cashierUid: callerUid,
       requestKey,
       orderType,
       items: billItems,
       subtotal: totalMinor / 100,
       total: checkoutLoyalty.netPaidMinor / 100,
       discount: checkoutLoyalty.discountMinor / 100,
+      // Preserve the phone attached to this sale, not a later customer profile.
+      ...(normalizedPhone == null || normalizedPhone === '' ? {} : { customerPhone: normalizedPhone }),
       ...(checkoutLoyalty.customerId == null ? {} : {
         loyalty: {
           customerId: checkoutLoyalty.customerId,

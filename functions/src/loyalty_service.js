@@ -506,6 +506,7 @@ async function saveLoyaltySettings({ db, callerUid, cafeId, settings }) {
       cafeId,
       roles: ['owner'],
     });
+    await require('./subscription_service').requireCafeSubscriptionTx({transaction,db,cafeId});
     transaction.update(db.collection('cafes').doc(cafeId), {
       loyaltySettings: settings,
       loyaltySettingsUpdatedAt: FieldValue.serverTimestamp(),

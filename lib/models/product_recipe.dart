@@ -12,11 +12,11 @@ class RecipeIngredient {
   final String unit;
 
   Map<String, dynamic> toMap() => {
-    'stockItemId': stockItemId,
-    'stockItemName': stockItemName,
-    'quantity': quantity,
-    'unit': unit,
-  };
+        'stockItemId': stockItemId,
+        'stockItemName': stockItemName,
+        'quantity': quantity,
+        'unit': unit,
+      };
 }
 
 class ProductRecipe {
@@ -31,8 +31,8 @@ class ProductRecipe {
   final List<RecipeIngredient> ingredients;
 
   Map<String, dynamic> toMap() => {
-    'name': name,
-    'sellingPrice': sellingPrice,
-    'ingredients': ingredients.map((item) => item.toMap()).toList(),
-  };
+        'name': name,
+        'sellingPrice': sellingPrice,
+        'ingredients': ingredients.map((item) => item.toMap()).toList(),
+      };
 }

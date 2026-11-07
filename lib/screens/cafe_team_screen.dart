@@ -1,4 +1,4 @@
-import 'package:firebase_auth/firebase_auth.dart';
+import '../firebase_runtime_config.dart';
 import 'package:flutter/material.dart';
 
 import '../models/cafe_membership.dart';
@@ -192,7 +192,7 @@ class _CafeTeamScreenState extends State<CafeTeamScreen> {
   @override
   Widget build(BuildContext context) {
     final currentUid =
-        widget.currentUid ?? FirebaseAuth.instance.currentUser?.uid;
+        widget.currentUid ?? BrewVerseFirebaseConfig.auth.currentUser?.uid;
     return Theme(
       data: AppTheme.emeraldLight,
       child: Scaffold(

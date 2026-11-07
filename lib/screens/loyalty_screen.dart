@@ -350,7 +350,7 @@ class _LoyaltyScreenState extends State<LoyaltyScreen> {
                             ),
                             const SizedBox(height: 5),
                             const Text(
-                              'Customer setup continues at checkout.',
+                              'New customers are saved only after successful checkout.',
                               textAlign: TextAlign.center,
                               style: TextStyle(
                                   color: AppTheme.mutedInk,
@@ -400,7 +400,7 @@ class _LoyaltyScreenState extends State<LoyaltyScreen> {
       return _LoyaltyState(
         key: const ValueKey('transactions'),
         icon: Icons.receipt_long_outlined,
-        title: 'Transaction history unavailable',
+        title: 'Transaction history is not included in this build',
         message: _hasWorkspace
             ? 'Look up a customer to view their current points balance. Points history is not available here yet.'
             : 'Select a café to look up customer balances. Points history is not available here yet.',
@@ -451,7 +451,7 @@ class _LoyaltyScreenState extends State<LoyaltyScreen> {
         icon: Icons.people_alt_outlined,
         title: 'Find a loyalty member',
         message: 'Search by phone number to view their saved points balance.',
-        note: 'Customer list unavailable',
+        note: 'Find customers by phone number',
       );
     }
     return ListView(
@@ -482,7 +482,7 @@ class _LoyaltyScreenState extends State<LoyaltyScreen> {
           ),
         ],
         const SizedBox(height: 12),
-        const Text('Customer list unavailable',
+        const Text('Find customers by phone number',
             textAlign: TextAlign.center,
             style: TextStyle(color: AppTheme.mutedInk, fontSize: 11)),
       ],

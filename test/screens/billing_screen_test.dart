@@ -1,9 +1,11 @@
 import 'dart:async';
+import 'package:firebase_core/firebase_core.dart';
 
 import 'package:brewverse_cafe_manager/models/stock_item.dart';
 import 'package:brewverse_cafe_manager/screens/billing_screen.dart';
 import 'package:brewverse_cafe_manager/screens/home_screen.dart';
 import 'package:brewverse_cafe_manager/services/cafe_service.dart';
+import 'package:brewverse_cafe_manager/services/checkout_recovery_store.dart';
 import 'package:brewverse_cafe_manager/theme/app_theme.dart';
 import 'package:brewverse_cafe_manager/widgets/cafe_bottom_navigation.dart';
 import 'package:flutter/material.dart';
@@ -18,6 +20,77 @@ class _UnusedCafeService implements CafeService {
 }
 
 void main() {
+  testWidgets(
+      'lost checkout reply is retained and retries reuse original ID across screen recreation',
+      (tester) async {
+    _phoneSize(tester);
+    final store = MemoryCheckoutRecoveryStore(),
+        service = _AmbiguousCheckoutService();
+    Future<void> mount() async {
+      await tester.pumpWidget(MaterialApp(
+          home: BillingScreen(
+              cafeId: 'fixture-cafe',
+              cafeService: service,
+              stockStream: Stream.value(_testProducts),
+              recoveryStore: store)));
+      await tester.pumpAndSettle();
+    }
+
+    await mount();
+    await tester.tap(find.byTooltip('Add Vanilla Latte'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Review order'));
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('Complete checkout'));
+    await tester.tap(find.text('Complete checkout'));
+    await tester.pumpAndSettle();
+    expect(service.ids.length, 1);
+    final id = service.ids.single;
+    expect((await store.load()).pending!.id, id);
+    await tester.pumpWidget(const SizedBox());
+    await tester.pumpAndSettle();
+    await mount();
+    expect((await store.load()).pending!.id, id);
+    final retry = find.textContaining('Retry same checkout');
+    await tester.ensureVisible(retry);
+    await tester.tap(retry);
+    await tester.pumpAndSettle();
+    expect(service.ids, [id, id]);
+    expect((await store.load()).pending!.id, id);
+  });
+  for (final prefilled in [false, true]) {
+    testWidgets(
+        'checkout preserves ${prefilled ? "prefilled" : "entered"} loyalty phone without requiring lookup',
+        (tester) async {
+      _phoneSize(tester);
+      final service = _CheckoutPhoneService();
+      await tester.pumpWidget(MaterialApp(
+        home: BillingScreen(
+          cafeId: 'fixture-cafe',
+          initialCustomerPhone: prefilled ? '+919876543210' : null,
+          cafeService: service,
+          stockStream: Stream.value(_testProducts),
+          recoveryStore: MemoryCheckoutRecoveryStore(),
+        ),
+      ));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Add Vanilla Latte'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Review order'));
+      await tester.pumpAndSettle();
+      if (!prefilled) {
+        final phone = _fieldWithLabel('Customer phone');
+        await tester.ensureVisible(phone);
+        await tester.enterText(phone, '+919876543210');
+      }
+      await tester.ensureVisible(find.text('Complete checkout'));
+      await tester.tap(find.text('Complete checkout'));
+      await tester.pumpAndSettle();
+      expect(service.checkoutPhones, ['+919876543210']);
+      expect(service.lookedUpPhones, isEmpty);
+      expect(tester.takeException(), isNull);
+    });
+  }
   testWidgets(
       'search filters real menu items and selected item appears in cart',
       (tester) async {
@@ -490,4 +563,38 @@ class _LoyaltyFixtureService extends _UnusedCafeService {
         'pointValueMinor': 100,
         'maxRedemptionPercent': 100,
       };
+}
+
+class _CheckoutPhoneService extends _LoyaltyFixtureService {
+  final checkoutPhones = <String?>[];
+
+  @override
+  Future<String> checkout({
+    required String checkoutId,
+    required Map<String, int> cart,
+    required String orderType,
+    String? customerPhone,
+    int redeemPoints = 0,
+  }) async {
+    checkoutPhones.add(customerPhone);
+    // Stop before persistence/printing; this regression observes the request.
+    throw StateError('fixture checkout stopped');
+  }
+}
+
+class _AmbiguousCheckoutService extends _LoyaltyFixtureService {
+  final ids = <String>[];
+  @override
+  Future<String> checkout(
+      {required String checkoutId,
+      required Map<String, int> cart,
+      required String orderType,
+      String? customerPhone,
+      int redeemPoints = 0}) async {
+    ids.add(checkoutId);
+    throw FirebaseException(
+        plugin: 'cloud_functions',
+        code: 'unavailable',
+        message: 'Connection lost');
+  }
 }

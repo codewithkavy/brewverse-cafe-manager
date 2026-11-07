@@ -1,5 +1,6 @@
 const { readFileSync } = require('node:fs');
 const path = require('node:path');
+const assert = require('node:assert/strict');
 const {
   initializeTestEnvironment,
   assertSucceeds,
@@ -16,6 +17,11 @@ const {
   setDoc,
   updateDoc,
   where,
+  orderBy,
+  documentId,
+  limit,
+  startAfter,
+  Timestamp,
 } = require('firebase/firestore');
 
 const projectId = 'brewverse-security-tests';
@@ -26,7 +32,7 @@ before(async () => {
     projectId,
     firestore: {
       host: '127.0.0.1',
-      port: 8085,
+      port: Number((process.env.FIRESTORE_EMULATOR_HOST || '127.0.0.1:8085').split(':').pop()),
       rules: readFileSync(path.join(__dirname, '..', 'firestore.rules'), 'utf8'),
     },
   });
@@ -91,6 +97,80 @@ const memberDb = (uid) => testEnv.authenticatedContext(uid).firestore();
 const record = (db, collectionName, id) => doc(db, collectionName, id);
 
 describe('BrewVerse test-only tenant authorization rules', () => {
+  it('subscription expiry and suspension block direct inventory edits while retaining reads', async () => {
+    const db=memberDb('ownerA'), item=doc(db,'stock_items','stock_itemsA');
+    for(const [allowed,state] of [
+      [true,{expiresAt:Timestamp.fromMillis(Date.now()+86400000),graceDays:0,suspended:false}],
+      [true,{expiresAt:Timestamp.fromMillis(Date.now()-86400000),graceDays:2,suspended:false}],
+      [false,{expiresAt:Timestamp.fromMillis(Date.now()-3*86400000),graceDays:1,suspended:false}],
+      [false,{expiresAt:Timestamp.fromMillis(Date.now()+86400000),graceDays:0,suspended:true}],
+    ]) {
+      await testEnv.withSecurityRulesDisabled(c=>setDoc(doc(c.firestore(),'cafe_subscriptions','cafeA'),state));
+      await (allowed?assertSucceeds:assertFails)(updateDoc(item,{name:'Allowed description'}));
+      await assertSucceeds(getDoc(item)); await assertSucceeds(getDoc(doc(db,'bills','billsA')));
+    }
+  });
+  it('both cafes reject foreign inventory, recipes, bills and stock movement reads and writes',async()=>{
+    for(const [uid,own,foreign] of [['ownerA','A','B'],['ownerB','B','A']]) {
+      const db=memberDb(uid);
+      for(const name of ['stock_items','product_recipes','bills','stock_movements']) {
+        await assertSucceeds(getDoc(doc(db,name,name+own)));
+        await assertFails(getDoc(doc(db,name,name+foreign)));
+        await assertFails(updateDoc(doc(db,name,name+foreign),{cafeId:'cafe'+own}));
+      }
+    }
+  });
+  it('bill history supports scoped date/phone pages for owner, manager and cashier, never foreign or revoked access', async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      const db = context.firestore();
+      for (const [id, cafeId, day] of [['old', 'cafeA', 19], ['new', 'cafeA', 20], ['other', 'cafeB', 21]]) {
+        await setDoc(doc(db, 'bills', id), {
+          cafeId, createdAt: Timestamp.fromDate(new Date(`2026-10-${day}T12:00:00Z`)),
+          customerPhone: '+919876543210', total: 80, status: 'completed',
+        });
+      }
+    });
+    for (const uid of ['ownerA', 'managerA', 'staffA']) {
+      const db = memberDb(uid);
+      const history = query(collection(db, 'bills'), where('cafeId', '==', 'cafeA'),
+        where('createdAt', '>=', Timestamp.fromDate(new Date('2026-10-19T00:00:00Z'))),
+        where('createdAt', '<', Timestamp.fromDate(new Date('2026-10-21T00:00:00Z'))),
+        orderBy('createdAt', 'desc'), orderBy(documentId(), 'desc'), limit(1));
+      const first = await assertSucceeds(getDocs(history));
+      assert.equal(first.docs[0].id, 'new');
+      const next = await assertSucceeds(getDocs(query(history, startAfter(first.docs[0]))));
+      assert.equal(next.docs[0].id, 'old');
+      const phones = await assertSucceeds(getDocs(query(collection(db, 'bills'),
+        where('cafeId', '==', 'cafeA'), where('customerPhone', '==', '+919876543210'),
+        orderBy('createdAt', 'desc'), orderBy(documentId(), 'desc'))));
+      assert.deepEqual(phones.docs.map((d) => d.id), ['new', 'old']);
+      await assertFails(getDocs(query(collection(db, 'bills'),
+        where('cafeId', '==', 'cafeA'), where(documentId(), '==', 'other'))));
+      await assertFails(getDoc(doc(db, 'bills', 'other')));
+      await assertFails(getDocs(query(collection(db, 'bills'), where('cafeId', '==', 'cafeB'), orderBy('createdAt', 'desc'))));
+      await assertFails(getDocs(query(collection(db, 'bills'), orderBy('createdAt', 'desc'))));
+    }
+    for (const db of [memberDb('revokedA'), testEnv.unauthenticatedContext().firestore()]) {
+      await assertFails(getDocs(query(collection(db, 'bills'), where('cafeId', '==', 'cafeA'), orderBy('createdAt', 'desc'))));
+    }
+  });
+  it('loads an absent first recipe through a tenant query without weakening missing-document rules', async () => {
+    const db = memberDb('ownerA');
+    // This is the original editor failure: there is no resource.data.cafeId.
+    await assertFails(getDoc(doc(db, 'product_recipes', 'new-burger')));
+    const recipeQuery = (client, cafeId, id) => query(
+      collection(client, 'product_recipes'),
+      where('cafeId', '==', cafeId),
+      where('productId', '==', id),
+    );
+    const empty = await assertSucceeds(getDocs(recipeQuery(db, 'cafeA', 'new-burger')));
+    assert.equal(empty.empty, true);
+    const existing = await assertSucceeds(getDocs(recipeQuery(db, 'cafeA', 'latte')));
+    assert.equal(existing.docs.length, 1);
+    await assertFails(getDocs(recipeQuery(db, 'cafeB', 'latte')));
+    await assertFails(getDocs(recipeQuery(memberDb('revokedA'), 'cafeA', 'new-burger')));
+    await assertFails(getDocs(recipeQuery(testEnv.unauthenticatedContext().firestore(), 'cafeA', 'new-burger')));
+  });
   it('lets a member read only their own membership and café profile', async () => {
     const db = memberDb('ownerA');
     await assertSucceeds(getDoc(record(db, 'cafe_members', 'ownerA_cafeA')));
@@ -240,6 +320,21 @@ describe('BrewVerse test-only tenant authorization rules', () => {
       quantityChange: 0,
     }));
     await assertFails(deleteDoc(record(manager, 'stock_movements', 'stock_movementsA')));
+  });
+
+  it('denies direct platform administration even with a client admin claim', async () => {
+    const admin = testEnv.authenticatedContext('ownerA', {super_admin:true}).firestore();
+    for (const collectionName of ['platform_admins','platform_config','platform_audit','subscription_payments']) {
+      await assertFails(setDoc(doc(admin, collectionName, 'injected'), {active:true,role:'super_admin'}));
+      await assertFails(getDocs(collection(admin, collectionName)));
+    }
+    await testEnv.withSecurityRulesDisabled(async context => {
+      await setDoc(doc(context.firestore(),'cafe_subscriptions','cafeA'),{suspended:true});
+    });
+    await assertSucceeds(getDoc(doc(memberDb('ownerA'),'cafe_subscriptions','cafeA')));
+    await assertFails(getDoc(doc(memberDb('ownerB'),'cafe_subscriptions','cafeA')));
+    await assertFails(updateDoc(doc(admin,'cafe_subscriptions','cafeA'),{suspended:false}));
+    await assertSucceeds(getDoc(record(memberDb('ownerA'),'bills','billsA')));
   });
 
   it('denies revoked members and all unspecified collection paths', async () => {

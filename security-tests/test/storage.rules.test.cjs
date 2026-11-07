@@ -5,7 +5,7 @@ const {
   assertSucceeds,
   initializeTestEnvironment,
 } = require('@firebase/rules-unit-testing');
-const { doc, setDoc } = require('firebase/firestore');
+const { doc, setDoc, Timestamp } = require('firebase/firestore');
 const { deleteObject, getBytes, ref, uploadBytes } = require('firebase/storage');
 
 const projectId = 'brewverse-security-tests';
@@ -23,12 +23,12 @@ before(async () => {
     projectId,
     firestore: {
       host: '127.0.0.1',
-      port: 8085,
+      port: Number((process.env.FIRESTORE_EMULATOR_HOST || '127.0.0.1:8085').split(':').pop()),
       rules: readFileSync(path.join(__dirname, '..', 'firestore.rules'), 'utf8'),
     },
     storage: {
       host: '127.0.0.1',
-      port: 9199,
+      port: Number((process.env.FIREBASE_STORAGE_EMULATOR_HOST || '127.0.0.1:9199').split(':').pop()),
       rules: readFileSync(path.join(__dirname, '..', 'storage.rules'), 'utf8'),
     },
   });
@@ -69,6 +69,21 @@ const image = new Uint8Array([137, 80, 78, 71]);
 const jpeg = { contentType: 'image/jpeg' };
 
 describe('BrewVerse test-only tenant Storage rules', () => {
+  it('subscription expiry and suspension block photo upload/delete but preserve existing image reads',async()=>{
+    const photo=ref(storageFor('ownerA'),'cafes/cafeA/products/subscription.jpg');
+    await assertSucceeds(uploadBytes(photo,image,jpeg));
+    for(const [allowed,state] of [
+      [true,{expiresAt:Timestamp.fromMillis(Date.now()+86400000),graceDays:0,suspended:false}],
+      [true,{expiresAt:Timestamp.fromMillis(Date.now()-86400000),graceDays:2,suspended:false}],
+      [false,{expiresAt:Timestamp.fromMillis(Date.now()-3*86400000),graceDays:1,suspended:false}],
+      [false,{expiresAt:Timestamp.fromMillis(Date.now()+86400000),graceDays:0,suspended:true}],
+    ]) {
+      await testEnv.withSecurityRulesDisabled(c=>setDoc(doc(c.firestore(),'cafe_subscriptions','cafeA'),state));
+      await (allowed?assertSucceeds:assertFails)(uploadBytes(photo,image,jpeg));
+      if(!allowed)await assertFails(deleteObject(photo));
+      await assertSucceeds(getBytes(photo));
+    }
+  });
   it('allows active members to read only same-café product images', async () => {
     const managerRef = ref(storageFor('managerA'), 'cafes/cafeA/products/item.jpg');
     await assertSucceeds(uploadBytes(managerRef, image, jpeg));

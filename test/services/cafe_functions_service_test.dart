@@ -108,6 +108,7 @@ void main() {
         'purchasePricePerUnit': 0.12,
         'sellingPrice': 0.0,
         'photoUrl': '',
+        'stockMode': 'recipe',
       });
       expect(calls['checkout']!['cart'], {'latte-a': 2});
       expect(calls['grantCafeMembership']!['email'], 'staff@example.test');

@@ -1,4 +1,7 @@
+import '../firebase_runtime_config.dart';
 import 'dart:convert';
+import 'server_connection.dart';
+import 'stock_operation_store.dart';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 
@@ -15,13 +18,48 @@ class CafeService {
     FirebaseFirestore? firestore,
     String? cafeId,
     CafeFunctionsService? functionsService,
-  })  : db = firestore ?? FirebaseFirestore.instance,
+    Future<void> Function()? onlineCheck,
+    StockOperationStore? stockOperationStore,
+  })  : db = firestore ?? BrewVerseFirebaseConfig.firestore,
         cafeId = cafeId == null ? null : _validateCafeId(cafeId),
-        _providedFunctionsService = functionsService;
+        _providedFunctionsService = functionsService,
+        _onlineCheck = onlineCheck,
+        _providedStockOperationStore = stockOperationStore,
+        _requiresDefaultOnlineCheck = firestore == null;
 
   final FirebaseFirestore db;
   final String? cafeId;
   final CafeFunctionsService? _providedFunctionsService;
+  final Future<void> Function()? _onlineCheck;
+  final bool _requiresDefaultOnlineCheck;
+  final StockOperationStore? _providedStockOperationStore;
+  StockOperationStore? _stockOperationStore;
+  StockOperationStore get _stockOperations =>
+      _stockOperationStore ??= _providedStockOperationStore ??
+          (_requiresDefaultOnlineCheck
+              ? DeviceStockOperationStore(
+                  uid: BrewVerseFirebaseConfig.auth.currentUser!.uid,
+                  cafeId: cafeId!)
+              : MemoryStockOperationStore());
+
+  Future<void> _requireOnline() async {
+    final injected = _onlineCheck;
+    if (injected != null) {
+      await injected();
+      return;
+    }
+    if (!_requiresDefaultOnlineCheck) return;
+    await requireServerConnection(() async {
+      if (cafeId != null) {
+        await db
+            .collection('cafes')
+            .doc(cafeId)
+            .get(const GetOptions(source: Source.server));
+      } else {
+        await stock.limit(1).get(const GetOptions(source: Source.server));
+      }
+    });
+  }
 
   late final TenantCafeDataService? _tenantData = cafeId == null
       ? null
@@ -45,9 +83,15 @@ class CafeService {
   Stream<List<StockItem>> watchStock() {
     final tenantData = _tenantData;
     if (tenantData != null) return tenantData.watchStock();
-    return stock.orderBy('name').snapshots().map(
-          (snapshot) => snapshot.docs.map(StockItem.fromDoc).toList(),
-        );
+    return stock
+        .orderBy('name')
+        .snapshots(includeMetadataChanges: true)
+        .map((snapshot) {
+      ServerConnection.instance.reportSnapshot(
+          fromCache: snapshot.metadata.isFromCache ||
+              snapshot.metadata.hasPendingWrites);
+      return snapshot.docs.map(StockItem.fromDoc).toList();
+    });
   }
 
   Stream<List<Map<String, dynamic>>> watchRecentMovements({int limit = 100}) {
@@ -71,6 +115,7 @@ class CafeService {
   }
 
   Future<String> addItem(StockItem item) async {
+    await _requireOnline();
     validateNewItem(item);
     final tenantId = cafeId;
     if (tenantId != null) {
@@ -104,6 +149,7 @@ class CafeService {
 
   // NEW: Update item details without overwriting live stock.
   Future<void> updateItem(StockItem item) async {
+    await _requireOnline();
     validateNewItem(item);
     if (item.id.trim().isEmpty) {
       throw ArgumentError('Item ID cannot be empty.');
@@ -124,8 +170,10 @@ class CafeService {
       }
       final updatedData = item.toMap();
 
-      // Keep the actual current stock quantity.
+      // Keep stock and photos independent from the rest of the edit form.
+      // An older open dialog must not undo a more recent photo update.
       updatedData['quantity'] = currentData['quantity'];
+      updatedData['photoUrl'] = currentData['photoUrl'] ?? item.photoUrl;
 
       // Do not let an edit overwrite the original creation time.
       updatedData.remove('createdAt');
@@ -142,6 +190,7 @@ class CafeService {
     required double quantity,
     required String reason,
   }) async {
+    await _requireOnline();
     if (!quantity.isFinite || quantity <= 0) {
       throw ArgumentError(
         'Quantity must be finite and greater than zero.',
@@ -150,12 +199,16 @@ class CafeService {
 
     final tenantId = cafeId;
     if (tenantId != null) {
+      final payload = jsonEncode([itemId.trim(), quantity, reason.trim()]);
+      final operationId = await _stockOperations.obtain(payload);
       await _functionsService.addStock(
         cafeId: tenantId,
         stockItemId: itemId,
         quantity: quantity,
         reason: reason,
+        operationId: operationId,
       );
+      await _stockOperations.complete(payload, operationId);
       return;
     }
 
@@ -195,15 +248,53 @@ class CafeService {
     String itemId,
     String photoUrl,
   ) async {
-    if (cafeId != null) {
-      final snapshot = await stock.doc(itemId).get();
-      if (!snapshot.exists || snapshot.data()?['cafeId'] != cafeId) {
+    await _requireOnline();
+    final itemRef = stock.doc(itemId);
+    // A transaction must reach Firestore; unlike update(), it cannot silently
+    // queue a stock metadata edit after a connection drops between checks.
+    await db.runTransaction((transaction) async {
+      final current = await transaction.get(itemRef);
+      if (!current.exists ||
+          (cafeId != null && current.data()?['cafeId'] != cafeId)) {
         throw StateError('Inventory item not found in this café.');
       }
+      transaction.update(itemRef, {
+        'photoUrl': photoUrl,
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+    });
+  }
+
+  /// Compare-and-set the image link, so a stale form cannot silently
+  /// overwrite another cashier's photo. Only use after the new object upload
+  /// has succeeded; callers clean up that object when this transaction fails.
+  Future<void> replacePhotoUrl({
+    required String itemId,
+    required String expectedUrl,
+    required String newUrl,
+  }) async {
+    await _requireOnline();
+    if (itemId.trim().isEmpty) {
+      throw ArgumentError('Item ID cannot be empty.');
     }
-    await stock.doc(itemId).update({
-      'photoUrl': photoUrl,
-      'updatedAt': FieldValue.serverTimestamp(),
+    final doc = stock.doc(itemId);
+    await db.runTransaction((tx) async {
+      final snapshot = await tx.get(doc);
+      if (!snapshot.exists) {
+        throw StateError('Inventory item no longer exists.');
+      }
+      final data = snapshot.data()!;
+      if (cafeId != null && data['cafeId'] != cafeId) {
+        throw StateError('Inventory item belongs to another café.');
+      }
+      final existingUrl = data['photoUrl'] as String? ?? '';
+      if (existingUrl != expectedUrl) {
+        throw StateError('This photo changed elsewhere. Reopen the item.');
+      }
+      tx.update(doc, {
+        'photoUrl': newUrl,
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
     });
   }
 
@@ -214,6 +305,7 @@ class CafeService {
     required List<Map<String, dynamic>> ingredients,
     List<Map<String, dynamic>> packaging = const [],
   }) async {
+    await _requireOnline();
     validateRecipe(ingredients: ingredients, packaging: packaging);
 
     final tenantId = cafeId;
@@ -279,10 +371,20 @@ class CafeService {
   }
 
   Future<Map<String, dynamic>?> loadRecipe(String productId) async {
+    final tenantId = cafeId;
+    if (tenantId != null) {
+      // A missing document has no cafeId for the rules to authorize a direct
+      // get. A cafe-constrained query authorizes the tenant even when there is
+      // no saved recipe yet, while preserving permission/connection errors.
+      final snapshot = await recipes
+          .where('cafeId', isEqualTo: tenantId)
+          .where('productId', isEqualTo: productId)
+          .limit(1)
+          .get();
+      return snapshot.docs.isEmpty ? null : snapshot.docs.single.data();
+    }
     final snapshot = await recipes.doc(productId).get();
-    final data = snapshot.data();
-    if (cafeId != null && data?['cafeId'] != cafeId) return null;
-    return data;
+    return snapshot.data();
   }
 
   Future<String?> loadCafeName() async {
@@ -333,6 +435,7 @@ class CafeService {
     String? customerPhone,
     int redeemPoints = 0,
   }) async {
+    await _requireOnline();
     if (checkoutId.trim().isEmpty) {
       throw ArgumentError('Checkout ID cannot be empty.');
     }
@@ -631,6 +734,10 @@ class CafeService {
     }
     if (item.unit.trim().isEmpty) {
       throw ArgumentError('Item unit cannot be empty.');
+    }
+    if (!['recipe', 'direct'].contains(item.stockMode) ||
+        (item.category != 'finished' && item.stockMode == 'direct')) {
+      throw ArgumentError('Only finished products support direct stock sales.');
     }
 
     for (final entry in <String, double>{

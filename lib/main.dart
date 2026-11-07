@@ -1,36 +1,56 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:cloud_functions/cloud_functions.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
-import 'package:firebase_storage/firebase_storage.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import 'firebase_options.dart';
+import 'firebase_runtime_config.dart';
 import 'screens/auth_gate.dart';
 import 'theme/app_theme.dart';
+import 'widgets/firebase_connection_scope.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  const useEmulators = bool.fromEnvironment('BREWVERSE_USE_FIREBASE_EMULATORS');
+  const useEmulators = BrewVerseFirebaseConfig.useEmulators;
   final options = useEmulators
       ? DefaultFirebaseOptions.currentPlatform.copyWith(
-          projectId: 'brewverse-security-tests',
+          projectId: BrewVerseFirebaseConfig.emulatorProjectId,
         )
       : DefaultFirebaseOptions.currentPlatform;
+  BrewVerseFirebaseConfig.validateOptions(options);
   await Firebase.initializeApp(
+    name: useEmulators ? BrewVerseFirebaseConfig.localAppName : null,
     options: options,
   );
 
   if (useEmulators) {
-    final host = defaultTargetPlatform == TargetPlatform.android && !kIsWeb
-        ? '10.0.2.2'
-        : '127.0.0.1';
-    await FirebaseAuth.instance.useAuthEmulator(host, 9099);
-    FirebaseFirestore.instance.useFirestoreEmulator(host, 8085);
-    FirebaseFunctions.instance.useFunctionsEmulator(host, 5001);
-    await FirebaseStorage.instance.useStorageEmulator(host, 9199);
+    // Physical Android devices reach the laptop through USB adb reverse.
+    // Android virtual devices can explicitly select 10.0.2.2 instead.
+    const host = String.fromEnvironment(
+      'BREWVERSE_FIREBASE_EMULATOR_HOST',
+      defaultValue: '127.0.0.1',
+    );
+    const autoMap = false;
+
+    await BrewVerseFirebaseConfig.auth.useAuthEmulator(
+      host,
+      9099,
+      automaticHostMapping: autoMap,
+    );
+    BrewVerseFirebaseConfig.firestore.useFirestoreEmulator(
+      host,
+      8085,
+      automaticHostMapping: autoMap,
+    );
+    BrewVerseFirebaseConfig.functions.useFunctionsEmulator(
+      host,
+      5001,
+      automaticHostMapping: autoMap,
+    );
+    await BrewVerseFirebaseConfig.storage.useStorageEmulator(
+      host,
+      9199,
+      automaticHostMapping: autoMap,
+    );
   }
 
   runApp(const BrewVerseApp());
@@ -46,6 +66,7 @@ class BrewVerseApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       themeMode: ThemeMode.dark,
       theme: AppTheme.dark,
+      builder: (context, child) => FirebaseConnectionScope(child: child!),
       darkTheme: AppTheme.dark,
       home: const AuthGate(),
     );

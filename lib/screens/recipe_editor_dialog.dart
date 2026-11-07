@@ -175,7 +175,7 @@ class _RecipeEditorDialogState extends State<RecipeEditorDialog> {
 
               final choices = stockSnapshot.data!
                   .where((item) =>
-                      item.category != 'finished' &&
+                      item.category == 'ingredient' &&
                       item.id != widget.product.id)
                   .toList();
 

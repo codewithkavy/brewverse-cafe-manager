@@ -1,9 +1,11 @@
+import '../firebase_runtime_config.dart';
 import 'package:flutter/material.dart';
 
 import '../models/cafe_membership.dart';
 import '../services/cafe_functions_service.dart';
 import '../services/cafe_membership_service.dart';
 import 'home_screen.dart';
+import '../widgets/sign_out_button.dart';
 
 typedef CafeWorkspaceHomeBuilder = Widget Function(
   BuildContext context,
@@ -90,17 +92,15 @@ class _CafeWorkspaceGateState extends State<CafeWorkspaceGate> {
           final membership = selected;
           // Keep pushed screens and dialogs within the authorized workspace.
           // Revocation, role changes, and switching users discard this stack.
-          return Navigator(
+          return _WorkspaceNavigator(
             key: ValueKey((widget.uid, membership.cafeId, membership.role)),
-            onGenerateRoute: (_) => MaterialPageRoute<void>(
-              builder: (context) => (widget.homeBuilder ?? _defaultHome)(
-                context,
-                membership,
-                () => setState(() {
-                  _selectedCafeId = null;
-                  _choosingCafe = true;
-                }),
-              ),
+            homeBuilder: (context) => (widget.homeBuilder ?? _defaultHome)(
+              context,
+              membership,
+              () => setState(() {
+                _selectedCafeId = null;
+                _choosingCafe = true;
+              }),
             ),
           );
         }
@@ -129,6 +129,30 @@ class _CafeWorkspaceGateState extends State<CafeWorkspaceGate> {
       );
 }
 
+// Keep system Back within the selected workspace. Its key still discards the
+// private route stack when the user, café, or role changes.
+class _WorkspaceNavigator extends StatefulWidget {
+  const _WorkspaceNavigator({required this.homeBuilder, super.key});
+  final WidgetBuilder homeBuilder;
+
+  @override
+  State<_WorkspaceNavigator> createState() => _WorkspaceNavigatorState();
+}
+
+class _WorkspaceNavigatorState extends State<_WorkspaceNavigator> {
+  final _navigatorKey = GlobalKey<NavigatorState>();
+
+  @override
+  Widget build(BuildContext context) => NavigatorPopHandler<void>(
+        onPopWithResult: (_) => _navigatorKey.currentState!.maybePop(),
+        child: Navigator(
+          key: _navigatorKey,
+          onGenerateRoute: (_) =>
+              MaterialPageRoute<void>(builder: widget.homeBuilder),
+        ),
+      );
+}
+
 class _CafeChooser extends StatelessWidget {
   const _CafeChooser({
     required this.memberships,
@@ -143,7 +167,9 @@ class _CafeChooser extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Choose a café')),
+      appBar: AppBar(title: const Text('Choose a café'), actions: [
+        const SignOutButton(),
+      ]),
       body: Center(
         child: ConstrainedBox(
           constraints: const BoxConstraints(maxWidth: 560),
@@ -286,6 +312,13 @@ class _GateMessage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Scaffold(
+        appBar: AppBar(actions: [
+          TextButton(
+              onPressed: () async {
+                await BrewVerseFirebaseConfig.auth.signOut();
+              },
+              child: const Text('Sign out'))
+        ]),
         body: Center(
           child: Padding(
             padding: const EdgeInsets.all(24),

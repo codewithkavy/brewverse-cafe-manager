@@ -11,6 +11,7 @@ class StockItem {
     required this.purchasePricePerUnit,
     required this.sellingPrice,
     this.photoUrl = '',
+    this.stockMode = 'recipe',
   });
 
   final String id;
@@ -22,9 +23,15 @@ class StockItem {
   final double purchasePricePerUnit;
   final double sellingPrice;
   final String photoUrl;
+  // Existing finished products use their recipe unless explicitly configured
+  // as a packaged/direct-stock product.
+  final String stockMode;
 
-  bool get isLow =>
-      category != 'finished' && quantity <= minimumQuantity;
+  bool get isRecipeProduct => category == 'finished' && stockMode != 'direct';
+
+  bool get isDirectStock => !isRecipeProduct;
+
+  bool get isLow => isDirectStock && quantity <= minimumQuantity;
 
   factory StockItem.fromDoc(DocumentSnapshot<Map<String, dynamic>> doc) {
     final d = doc.data() ?? {};
@@ -39,18 +46,20 @@ class StockItem {
       purchasePricePerUnit: number('purchasePricePerUnit'),
       sellingPrice: number('sellingPrice'),
       photoUrl: d['photoUrl'] as String? ?? '',
+      stockMode: d['stockMode'] as String? ?? 'recipe',
     );
   }
 
   Map<String, dynamic> toMap() => {
-    'name': name,
-    'category': category,
-    'unit': unit,
-    'quantity': quantity,
-    'minimumQuantity': minimumQuantity,
-    'purchasePricePerUnit': purchasePricePerUnit,
-    'sellingPrice': sellingPrice,
-    'photoUrl': photoUrl,
-    'updatedAt': FieldValue.serverTimestamp(),
-  };
+        'name': name,
+        'category': category,
+        'unit': unit,
+        'quantity': quantity,
+        'minimumQuantity': minimumQuantity,
+        'purchasePricePerUnit': purchasePricePerUnit,
+        'sellingPrice': sellingPrice,
+        'photoUrl': photoUrl,
+        'stockMode': stockMode,
+        'updatedAt': FieldValue.serverTimestamp(),
+      };
 }

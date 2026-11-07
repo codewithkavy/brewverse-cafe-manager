@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import '../models/stock_item.dart';
 import '../models/cafe_membership.dart';
 import '../services/cafe_service.dart';
+import '../services/server_connection.dart';
 import '../services/photo_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/cafe_bottom_navigation.dart';
@@ -128,11 +129,15 @@ class _InventoryScreenState extends State<InventoryScreen> {
     }
   }
 
-  void _showAddItemDialog() =>
-      _openForm(_AddItemDialog(service: service), 'Stock item saved.');
+  void _showAddItemDialog() {
+    if (!ServerConnection.instance.canWrite) return;
+    _openForm(_AddItemDialog(service: service), 'Stock item saved.');
+  }
 
   void _itemAction(_StockAction action, StockItem item) {
-    if (!widget.canManageInventory) return;
+    if (!widget.canManageInventory || !ServerConnection.instance.canWrite) {
+      return;
+    }
     switch (action) {
       case _StockAction.edit:
         _openForm(_EditItemDialog(service: service, item: item),
@@ -141,7 +146,7 @@ class _InventoryScreenState extends State<InventoryScreen> {
         _openForm(_AddStockDialog(service: service, item: item),
             'Stock added successfully.');
       case _StockAction.recipe:
-        if (item.category == 'finished') {
+        if (item.isRecipeProduct) {
           _openDialog<bool>(
               RecipeEditorDialog(service: service, product: item));
         }
@@ -166,6 +171,12 @@ class _InventoryScreenState extends State<InventoryScreen> {
                       item.category == 'finished'
                           ? 'Finished product'
                           : 'Ingredient'),
+                  if (item.category == 'finished')
+                    _detailRow(
+                        'Stock deduction',
+                        item.isRecipeProduct
+                            ? 'Recipe ingredients'
+                            : 'Direct stock'),
                   _detailRow('Current quantity',
                       '${_stockNumber(item.quantity)} ${item.unit}'),
                   _detailRow('Minimum quantity',
@@ -207,198 +218,210 @@ class _InventoryScreenState extends State<InventoryScreen> {
       );
 
   @override
-  Widget build(BuildContext context) => Theme(
-        data: AppTheme.emeraldLight,
-        child: Scaffold(
-          backgroundColor: AppTheme.forest,
-          appBar: AppBar(
-            toolbarHeight: 52,
-            leadingWidth: 42,
-            leading: IconButton(
-              tooltip: MaterialLocalizations.of(context).backButtonTooltip,
-              onPressed: _goBack,
-              icon: const Icon(Icons.arrow_back_rounded, size: 21),
-            ),
+  Widget build(BuildContext context) => ListenableBuilder(
+        listenable: ServerConnection.instance,
+        builder: (context, _) => Theme(
+          data: AppTheme.emeraldLight,
+          child: Scaffold(
             backgroundColor: AppTheme.forest,
-            foregroundColor: Colors.white,
-            titleSpacing: 0,
-            title: const Text('Inventory',
-                style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 18,
-                    fontWeight: FontWeight.w700)),
-            actions: [
-              IconButton(
-                tooltip: 'Stock movement history',
-                onPressed: () =>
-                    _openDialog<void>(_MovementHistoryDialog(service: service)),
-                icon: const Icon(Icons.history_rounded, size: 21),
+            appBar: AppBar(
+              toolbarHeight: 52,
+              leadingWidth: 42,
+              leading: IconButton(
+                tooltip: MaterialLocalizations.of(context).backButtonTooltip,
+                onPressed: _goBack,
+                icon: const Icon(Icons.arrow_back_rounded, size: 21),
               ),
-              if (widget.canManageInventory)
-                IconButton.filled(
-                  tooltip: 'Add item',
-                  style: IconButton.styleFrom(
-                    backgroundColor: _copper,
-                    foregroundColor: AppTheme.forest,
-                    minimumSize: const Size(36, 36),
-                  ),
-                  onPressed: _showAddItemDialog,
-                  icon: const Icon(Icons.add_rounded, size: 23),
+              backgroundColor: AppTheme.forest,
+              foregroundColor: Colors.white,
+              titleSpacing: 0,
+              title: const Text('Inventory',
+                  style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 18,
+                      fontWeight: FontWeight.w700)),
+              actions: [
+                IconButton(
+                  tooltip: 'Stock movement history',
+                  onPressed: () => _openDialog<void>(
+                      _MovementHistoryDialog(service: service)),
+                  icon: const Icon(Icons.history_rounded, size: 21),
                 ),
-              const SizedBox(width: 8),
-            ],
-          ),
-          body: ClipRRect(
-            borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
-            child: ColoredBox(
-              color: AppTheme.paper,
-              child: Center(
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 900),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      Padding(
-                        padding: const EdgeInsets.fromLTRB(12, 12, 8, 4),
-                        child: Row(
-                          children: [
-                            Expanded(
-                              child: TextField(
-                                controller: _searchController,
-                                onChanged: (value) =>
-                                    setState(() => _searchQuery = value),
-                                style: const TextStyle(
-                                    color: _cream, fontSize: 13),
-                                decoration: InputDecoration(
-                                  hintText: 'Search stock items',
-                                  prefixIcon: const Icon(Icons.search_rounded,
-                                      size: 19),
-                                  suffixIcon: _searchQuery.isEmpty
-                                      ? null
-                                      : IconButton(
-                                          tooltip: 'Clear search',
-                                          onPressed: () {
-                                            _searchController.clear();
-                                            setState(() => _searchQuery = '');
-                                          },
-                                          icon: const Icon(Icons.close_rounded,
-                                              size: 18),
-                                        ),
-                                  fillColor: AppTheme.card,
-                                  isDense: true,
-                                  contentPadding: const EdgeInsets.symmetric(
-                                      horizontal: 12, vertical: 12),
-                                  enabledBorder: OutlineInputBorder(
-                                    borderRadius: BorderRadius.circular(24),
-                                    borderSide: BorderSide.none,
+                if (widget.canManageInventory)
+                  IconButton.filled(
+                    tooltip: 'Add item',
+                    style: IconButton.styleFrom(
+                      backgroundColor: _copper,
+                      foregroundColor: AppTheme.forest,
+                      minimumSize: const Size(36, 36),
+                    ),
+                    onPressed: ServerConnection.instance.canWrite
+                        ? _showAddItemDialog
+                        : null,
+                    icon: const Icon(Icons.add_rounded, size: 23),
+                  ),
+                const SizedBox(width: 8),
+              ],
+            ),
+            body: ClipRRect(
+              borderRadius:
+                  const BorderRadius.vertical(top: Radius.circular(24)),
+              child: ColoredBox(
+                color: AppTheme.paper,
+                child: Center(
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 900),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(12, 12, 8, 4),
+                          child: Row(
+                            children: [
+                              Expanded(
+                                child: TextField(
+                                  controller: _searchController,
+                                  onChanged: (value) =>
+                                      setState(() => _searchQuery = value),
+                                  style: const TextStyle(
+                                      color: _cream, fontSize: 13),
+                                  decoration: InputDecoration(
+                                    hintText: 'Search stock items',
+                                    prefixIcon: const Icon(Icons.search_rounded,
+                                        size: 19),
+                                    suffixIcon: _searchQuery.isEmpty
+                                        ? null
+                                        : IconButton(
+                                            tooltip: 'Clear search',
+                                            onPressed: () {
+                                              _searchController.clear();
+                                              setState(() => _searchQuery = '');
+                                            },
+                                            icon: const Icon(
+                                                Icons.close_rounded,
+                                                size: 18),
+                                          ),
+                                    fillColor: AppTheme.card,
+                                    isDense: true,
+                                    contentPadding: const EdgeInsets.symmetric(
+                                        horizontal: 12, vertical: 12),
+                                    enabledBorder: OutlineInputBorder(
+                                      borderRadius: BorderRadius.circular(24),
+                                      borderSide: BorderSide.none,
+                                    ),
                                   ),
                                 ),
                               ),
-                            ),
-                            const SizedBox(width: 5),
-                            PopupMenuButton<String>(
-                              tooltip: 'Filter stock items',
-                              color: AppTheme.card,
-                              onSelected: (value) =>
-                                  setState(() => _filter = value),
-                              icon: Container(
-                                  width: 32,
-                                  height: 36,
-                                  decoration: BoxDecoration(
-                                      color: AppTheme.forest,
-                                      borderRadius: BorderRadius.circular(11)),
-                                  child: const Icon(Icons.filter_alt_outlined,
-                                      color: Colors.white, size: 19)),
-                              itemBuilder: (_) => [
-                                for (final entry in const {
-                                  'all': 'All',
-                                  'ingredients': 'Ingredients',
-                                  'products': 'Products',
-                                  'low': 'Low stock',
-                                }.entries)
-                                  CheckedPopupMenuItem(
-                                      value: entry.key,
-                                      checked: _filter == entry.key,
-                                      child: Text(entry.value)),
-                              ],
-                            ),
-                          ],
+                              const SizedBox(width: 5),
+                              PopupMenuButton<String>(
+                                tooltip: 'Filter stock items',
+                                color: AppTheme.card,
+                                onSelected: (value) =>
+                                    setState(() => _filter = value),
+                                icon: Container(
+                                    width: 32,
+                                    height: 36,
+                                    decoration: BoxDecoration(
+                                        color: AppTheme.forest,
+                                        borderRadius:
+                                            BorderRadius.circular(11)),
+                                    child: const Icon(Icons.filter_alt_outlined,
+                                        color: Colors.white, size: 19)),
+                                itemBuilder: (_) => [
+                                  for (final entry in const {
+                                    'all': 'All',
+                                    'ingredients': 'Ingredients',
+                                    'products': 'Products',
+                                    'low': 'Low stock',
+                                  }.entries)
+                                    CheckedPopupMenuItem(
+                                        value: entry.key,
+                                        checked: _filter == entry.key,
+                                        child: Text(entry.value)),
+                                ],
+                              ),
+                            ],
+                          ),
                         ),
-                      ),
-                      SizedBox(
-                        height: MediaQuery.textScalerOf(context).scale(12) + 28,
-                        child: ListView(
-                          padding: const EdgeInsets.symmetric(horizontal: 12),
-                          scrollDirection: Axis.horizontal,
-                          children: [
-                            _filterChip('All', 'all'),
-                            _filterChip('Ingredients', 'ingredients'),
-                            _filterChip('Products', 'products'),
-                            _filterChip('Low stock', 'low'),
-                          ],
+                        SizedBox(
+                          height:
+                              MediaQuery.textScalerOf(context).scale(12) + 28,
+                          child: ListView(
+                            padding: const EdgeInsets.symmetric(horizontal: 12),
+                            scrollDirection: Axis.horizontal,
+                            children: [
+                              _filterChip('All', 'all'),
+                              _filterChip('Ingredients', 'ingredients'),
+                              _filterChip('Products', 'products'),
+                              _filterChip('Low stock', 'low'),
+                            ],
+                          ),
                         ),
-                      ),
-                      Expanded(
-                        child: StreamBuilder<List<StockItem>>(
-                          stream: _stockStream,
-                          builder: (context, snapshot) {
-                            if (snapshot.hasError) {
-                              return _emptyState(
-                                  Icons.cloud_off_outlined,
-                                  'Inventory unavailable',
-                                  'Could not load inventory. Check your connection.');
-                            }
-                            if (!snapshot.hasData) {
-                              return const Center(
-                                  child: CircularProgressIndicator());
-                            }
-                            final items = snapshot.data!;
-                            final visibleItems = items.where((item) {
-                              final queryMatches = item.name
-                                  .toLowerCase()
-                                  .contains(_searchQuery.trim().toLowerCase());
-                              final filterMatches = switch (_filter) {
-                                'ingredients' => item.category == 'ingredient',
-                                'products' => item.category == 'finished',
-                                'low' => item.isLow,
-                                _ => true,
-                              };
-                              return queryMatches && filterMatches;
-                            }).toList(growable: false);
-                            if (visibleItems.isEmpty) {
-                              return _emptyState(
-                                items.isEmpty
-                                    ? Icons.inventory_2_outlined
-                                    : Icons.search_off_rounded,
-                                items.isEmpty
-                                    ? 'No stock items yet'
-                                    : 'No matching stock',
-                                items.isEmpty
-                                    ? 'Add an item to start tracking café stock.'
-                                    : _searchQuery.isEmpty
-                                        ? 'No items in this filter.'
-                                        : 'No items match “$_searchQuery”.',
+                        Expanded(
+                          child: StreamBuilder<List<StockItem>>(
+                            stream: _stockStream,
+                            builder: (context, snapshot) {
+                              if (snapshot.hasError) {
+                                return _emptyState(
+                                    Icons.cloud_off_outlined,
+                                    'Inventory unavailable',
+                                    'Could not load inventory. Check your connection.');
+                              }
+                              if (!snapshot.hasData) {
+                                return const Center(
+                                    child: CircularProgressIndicator());
+                              }
+                              final items = snapshot.data!;
+                              final visibleItems = items.where((item) {
+                                final queryMatches = item.name
+                                    .toLowerCase()
+                                    .contains(
+                                        _searchQuery.trim().toLowerCase());
+                                final filterMatches = switch (_filter) {
+                                  'ingredients' =>
+                                    item.category == 'ingredient',
+                                  'products' => item.category == 'finished',
+                                  'low' => item.isLow,
+                                  _ => true,
+                                };
+                                return queryMatches && filterMatches;
+                              }).toList(growable: false);
+                              if (visibleItems.isEmpty) {
+                                return _emptyState(
+                                  items.isEmpty
+                                      ? Icons.inventory_2_outlined
+                                      : Icons.search_off_rounded,
+                                  items.isEmpty
+                                      ? 'No stock items yet'
+                                      : 'No matching stock',
+                                  items.isEmpty
+                                      ? 'Add an item to start tracking café stock.'
+                                      : _searchQuery.isEmpty
+                                          ? 'No items in this filter.'
+                                          : 'No items match “$_searchQuery”.',
+                                );
+                              }
+                              return ListView.separated(
+                                padding:
+                                    const EdgeInsets.fromLTRB(12, 4, 12, 16),
+                                itemCount: visibleItems.length,
+                                separatorBuilder: (_, __) =>
+                                    const SizedBox(height: 2),
+                                itemBuilder: (_, index) =>
+                                    _stockRow(visibleItems[index]),
                               );
-                            }
-                            return ListView.separated(
-                              padding: const EdgeInsets.fromLTRB(12, 4, 12, 16),
-                              itemCount: visibleItems.length,
-                              separatorBuilder: (_, __) =>
-                                  const SizedBox(height: 2),
-                              itemBuilder: (_, index) =>
-                                  _stockRow(visibleItems[index]),
-                            );
-                          },
+                            },
+                          ),
                         ),
-                      ),
-                    ],
+                      ],
+                    ),
                   ),
                 ),
               ),
             ),
+            bottomNavigationBar: CafeBottomNavigation(
+                selectedIndex: 1, onDestinationSelected: _selectTab),
           ),
-          bottomNavigationBar: CafeBottomNavigation(
-              selectedIndex: 1, onDestinationSelected: _selectTab),
         ),
       );
 
@@ -427,14 +450,14 @@ class _InventoryScreenState extends State<InventoryScreen> {
 
   Widget _stockRow(StockItem item) {
     final product = item.category == 'finished';
-    final status = product
+    final status = item.isRecipeProduct
         ? 'Recipe product'
         : item.quantity <= 0
             ? 'Out of stock'
             : item.isLow
                 ? 'Low stock'
                 : 'In stock';
-    final low = !product && item.isLow;
+    final low = item.isLow;
     return Material(
       color: _card,
       borderRadius: BorderRadius.circular(13),
@@ -490,6 +513,7 @@ class _InventoryScreenState extends State<InventoryScreen> {
                     color: AppTheme.card,
                     icon: const Icon(Icons.more_vert_rounded,
                         color: _muted, size: 18),
+                    enabled: ServerConnection.instance.canWrite,
                     onSelected: (action) => _itemAction(action, item),
                     itemBuilder: (_) => [
                       const PopupMenuItem(
@@ -497,7 +521,7 @@ class _InventoryScreenState extends State<InventoryScreen> {
                       const PopupMenuItem(
                           value: _StockAction.addStock,
                           child: Text('Add stock')),
-                      if (product)
+                      if (item.isRecipeProduct)
                         const PopupMenuItem(
                             value: _StockAction.recipe,
                             child: Text('Manage recipe')),
@@ -683,6 +707,47 @@ class _AddStockDialogState extends State<_AddStockDialog> {
       );
 }
 
+class _StockModeField extends StatelessWidget {
+  const _StockModeField({
+    required this.value,
+    required this.enabled,
+    required this.onChanged,
+  });
+
+  final String value;
+  final bool enabled;
+  final ValueChanged<String> onChanged;
+
+  @override
+  Widget build(BuildContext context) => DropdownButtonFormField<String>(
+        key: const Key('itemStockMode'),
+        initialValue: value,
+        isExpanded: true,
+        decoration: InputDecoration(
+          labelText: 'Stock deduction',
+          helperText: value == 'direct'
+              ? 'Checkout deducts this item’s quantity.'
+              : 'Checkout deducts ingredients from the saved recipe.',
+          helperMaxLines: 3,
+        ),
+        items: const [
+          DropdownMenuItem(
+            value: 'recipe',
+            child: Text('Recipe ingredients'),
+          ),
+          DropdownMenuItem(
+            value: 'direct',
+            child: Text('Direct stock'),
+          ),
+        ],
+        onChanged: enabled
+            ? (next) {
+                if (next != null) onChanged(next);
+              }
+            : null,
+      );
+}
+
 class _AddItemDialog extends StatefulWidget {
   const _AddItemDialog({required this.service});
 
@@ -700,8 +765,11 @@ class _AddItemDialogState extends State<_AddItemDialog> {
   final _purchase = TextEditingController(text: '0');
   final _selling = TextEditingController(text: '0');
   String _category = 'ingredient';
+  String _stockMode = 'recipe';
   String _unit = 'g';
   bool _saving = false;
+  bool _pickingPhoto = false;
+  SelectedProductPhoto? _selectedPhoto;
 
   @override
   void dispose() {
@@ -729,8 +797,27 @@ class _AddItemDialogState extends State<_AddItemDialog> {
     return null;
   }
 
+  Future<void> _choosePhoto() async {
+    final cafeId = widget.service.cafeId;
+    if (cafeId == null || _saving || _pickingPhoto) return;
+    setState(() => _pickingPhoto = true);
+    try {
+      final selected = await PhotoService(cafeId: cafeId).choosePhoto();
+      if (selected != null && mounted) {
+        setState(() => _selectedPhoto = selected);
+      }
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not select photo: $error')),
+      );
+    } finally {
+      if (mounted) setState(() => _pickingPhoto = false);
+    }
+  }
+
   Future<void> _saveItem() async {
-    if (_saving || !_formKey.currentState!.validate()) return;
+    if (_saving || _pickingPhoto || !_formKey.currentState!.validate()) return;
 
     setState(() => _saving = true);
 
@@ -739,6 +826,7 @@ class _AddItemDialogState extends State<_AddItemDialog> {
         id: '',
         name: _name.text.trim(),
         category: _category,
+        stockMode: _category == 'finished' ? _stockMode : 'recipe',
         unit: _unit,
         quantity: _number(_quantity)!,
         minimumQuantity: _number(_minimum)!,
@@ -746,7 +834,47 @@ class _AddItemDialogState extends State<_AddItemDialog> {
         sellingPrice: _number(_selling)!,
       );
 
-      await widget.service.addItem(item);
+      final itemId = await widget.service.addItem(item);
+      final selected = _selectedPhoto;
+      final cafeId = widget.service.cafeId;
+      if (selected != null && cafeId != null) {
+        final photos = PhotoService(cafeId: cafeId);
+        UploadedProductPhoto? uploaded;
+        try {
+          uploaded = await photos.uploadPhoto(itemId, selected);
+          await widget.service.replacePhotoUrl(
+            itemId: itemId,
+            expectedUrl: '',
+            newUrl: uploaded.url,
+          );
+        } catch (error) {
+          if (uploaded != null) {
+            try {
+              await photos.deleteUploadedPhoto(uploaded);
+            } catch (_) {
+              // A failed cleanup must not result in a duplicate stock item.
+            }
+          }
+          if (mounted) {
+            await showDialog<void>(
+              context: context,
+              builder: (_) => AlertDialog(
+                title: const Text('Item saved without a photo'),
+                content: Text(
+                  'Your inventory item was created, but its photo could not '
+                  'be saved. Edit the item to try again.\n${PhotoService.failureMessage(error)}',
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.of(context).pop(),
+                    child: const Text('OK'),
+                  ),
+                ],
+              ),
+            );
+          }
+        }
+      }
 
       if (!mounted) return;
       Navigator.of(context).pop(true);
@@ -765,7 +893,7 @@ class _AddItemDialogState extends State<_AddItemDialog> {
         title: 'Add stock item',
         saveLabel: 'Save item',
         saving: _saving,
-        onSave: _saving ? null : _saveItem,
+        onSave: _saving || _pickingPhoto ? null : _saveItem,
         child: Form(
           key: _formKey,
           child: Column(
@@ -773,25 +901,34 @@ class _AddItemDialogState extends State<_AddItemDialog> {
             children: [
               Row(
                 children: [
-                  Container(
-                    width: 64,
-                    constraints: const BoxConstraints(minHeight: 72),
-                    padding: const EdgeInsets.symmetric(vertical: 12),
-                    decoration: BoxDecoration(
-                      color: AppTheme.softOrange,
+                  InkWell(
+                    key: const Key('addItemPhotoTile'),
+                    onTap: widget.service.cafeId == null ||
+                            _saving ||
+                            _pickingPhoto
+                        ? null
+                        : _choosePhoto,
+                    child: ClipRRect(
                       borderRadius: BorderRadius.circular(14),
-                    ),
-                    child: const Column(
-                      mainAxisSize: MainAxisSize.min,
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Icon(Icons.photo_camera_outlined,
-                            color: AppTheme.orangeDeep, size: 23),
-                        SizedBox(height: 5),
-                        Text('Photo',
-                            style: TextStyle(
-                                color: AppTheme.orangeDeep, fontSize: 10)),
-                      ],
+                      child: SizedBox(
+                        width: 64,
+                        height: 72,
+                        child: ColoredBox(
+                          color: AppTheme.softOrange,
+                          child: _selectedPhoto != null
+                              ? Image.memory(
+                                  _selectedPhoto!.bytes,
+                                  fit: BoxFit.cover,
+                                )
+                              : const Center(
+                                  child: Icon(
+                                    Icons.photo_camera_outlined,
+                                    color: AppTheme.orangeDeep,
+                                    size: 23,
+                                  ),
+                                ),
+                        ),
+                      ),
                     ),
                   ),
                   const SizedBox(width: 12),
@@ -805,9 +942,38 @@ class _AddItemDialogState extends State<_AddItemDialog> {
                   ),
                 ],
               ),
-              const SizedBox(height: 7),
-              const Text('Save the item first, then add a photo in Edit item.',
-                  style: TextStyle(color: _muted, fontSize: 11, height: 1.4)),
+              const SizedBox(height: 8),
+              if (widget.service.cafeId != null) ...[
+                OutlinedButton.icon(
+                  key: const Key('addItemChoosePhoto'),
+                  onPressed: _saving || _pickingPhoto ? null : _choosePhoto,
+                  icon: _pickingPhoto
+                      ? const SizedBox.square(
+                          dimension: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.add_photo_alternate_outlined),
+                  label: Text(
+                    _pickingPhoto
+                        ? 'Opening gallery…'
+                        : _selectedPhoto == null
+                            ? 'Choose product photo (optional)'
+                            : 'Change selected photo',
+                  ),
+                ),
+                if (_selectedPhoto != null)
+                  TextButton.icon(
+                    onPressed: _saving
+                        ? null
+                        : () => setState(() => _selectedPhoto = null),
+                    icon: const Icon(Icons.close_rounded, size: 18),
+                    label: const Text('Clear selection'),
+                  ),
+              ] else
+                const Text(
+                  'Photos require a selected café workspace.',
+                  style: TextStyle(color: _muted, fontSize: 11),
+                ),
               const SizedBox(height: 10),
               DropdownButtonFormField<String>(
                 initialValue: _category,
@@ -829,6 +995,14 @@ class _AddItemDialogState extends State<_AddItemDialog> {
                           () => _category = value ?? 'ingredient',
                         ),
               ),
+              if (_category == 'finished') ...[
+                const SizedBox(height: 10),
+                _StockModeField(
+                  value: _stockMode,
+                  enabled: !_saving,
+                  onChanged: (value) => setState(() => _stockMode = value),
+                ),
+              ],
               const SizedBox(height: 10),
               DropdownButtonFormField<String>(
                 initialValue: _unit,
@@ -934,6 +1108,7 @@ class _EditItemDialogState extends State<_EditItemDialog> {
   late final TextEditingController _selling;
 
   late String _category;
+  late String _stockMode;
   late String _unit;
   late String _photoUrl;
   bool _saving = false;
@@ -954,6 +1129,7 @@ class _EditItemDialogState extends State<_EditItemDialog> {
     );
     _selling = TextEditingController(text: item.sellingPrice.toString());
     _category = item.category;
+    _stockMode = item.stockMode == 'direct' ? 'direct' : 'recipe';
     _unit = _units.contains(item.unit) ? item.unit : 'piece';
     _photoUrl = item.photoUrl;
   }
@@ -988,21 +1164,81 @@ class _EditItemDialogState extends State<_EditItemDialog> {
     if (_saving || _uploadingPhoto || cafeId == null) return;
 
     setState(() => _uploadingPhoto = true);
+    final photos = PhotoService(cafeId: cafeId);
+    UploadedProductPhoto? uploaded;
     try {
-      final photoUrl =
-          await PhotoService(cafeId: cafeId).chooseAndUpload(widget.item.id);
-      if (photoUrl == null) return;
+      final selected = await photos.choosePhoto();
+      if (selected == null) return;
 
-      await widget.service.setPhotoUrl(widget.item.id, photoUrl);
+      final previousUrl = _photoUrl;
+      uploaded = await photos.uploadPhoto(widget.item.id, selected);
+      await widget.service.replacePhotoUrl(
+        itemId: widget.item.id,
+        expectedUrl: previousUrl,
+        newUrl: uploaded.url,
+      );
       if (!mounted) return;
-      setState(() => _photoUrl = photoUrl);
+      setState(() => _photoUrl = uploaded!.url);
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Product photo updated.')),
+      );
+      if (previousUrl.isNotEmpty) {
+        try {
+          await photos.deletePreviousPhoto(widget.item.id, previousUrl);
+        } catch (_) {
+          // The newly saved photo is valid even when old cleanup fails.
+        }
+      }
+    } catch (error) {
+      if (uploaded != null) {
+        try {
+          await photos.deleteUploadedPhoto(uploaded);
+        } catch (_) {
+          // Best-effort cleanup. Do not overwrite the original failure.
+        }
+      }
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+            content: Text(
+                'Could not update product photo: ${PhotoService.failureMessage(error)}')),
+      );
+    } finally {
+      if (mounted) setState(() => _uploadingPhoto = false);
+    }
+  }
+
+  Future<void> _removePhoto() async {
+    final cafeId = widget.service.cafeId;
+    if (cafeId == null || _uploadingPhoto || _saving || _photoUrl.isEmpty) {
+      return;
+    }
+    setState(() => _uploadingPhoto = true);
+    final previousUrl = _photoUrl;
+    try {
+      await widget.service.replacePhotoUrl(
+        itemId: widget.item.id,
+        expectedUrl: previousUrl,
+        newUrl: '',
+      );
+      if (!mounted) return;
+      setState(() => _photoUrl = '');
+      try {
+        await PhotoService(cafeId: cafeId)
+            .deletePreviousPhoto(widget.item.id, previousUrl);
+      } catch (_) {
+        // The Firestore reference is cleared; old-object cleanup may retry.
+      }
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Product photo removed.')),
       );
     } catch (error) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Could not upload product photo: $error')),
+        SnackBar(
+            content: Text(
+                'Could not remove product photo: ${PhotoService.failureMessage(error)}')),
       );
     } finally {
       if (mounted) setState(() => _uploadingPhoto = false);
@@ -1021,6 +1257,7 @@ class _EditItemDialogState extends State<_EditItemDialog> {
         id: old.id,
         name: _name.text.trim(),
         category: _category,
+        stockMode: _category == 'finished' ? _stockMode : 'recipe',
         unit: _unit,
         // This value is preserved again by CafeService.updateItem.
         quantity: old.quantity,
@@ -1053,7 +1290,7 @@ class _EditItemDialogState extends State<_EditItemDialog> {
         title: 'Edit item details',
         saveLabel: 'Save changes',
         saving: _saving,
-        onSave: _saving ? null : _save,
+        onSave: _saving || _uploadingPhoto ? null : _save,
         child: Form(
           key: _formKey,
           child: Column(
@@ -1087,9 +1324,16 @@ class _EditItemDialogState extends State<_EditItemDialog> {
                     ),
                   ],
                 ),
+                if (_photoUrl.isNotEmpty)
+                  TextButton.icon(
+                    key: const Key('editItemRemovePhoto'),
+                    onPressed: _saving || _uploadingPhoto ? null : _removePhoto,
+                    icon: const Icon(Icons.delete_outline_rounded),
+                    label: const Text('Remove product photo'),
+                  ),
                 const SizedBox(height: 8),
                 const Text(
-                  'JPEG product photos up to 5 MiB are stored in this café.',
+                  'JPEG, PNG or WebP product photos up to 5 MiB are stored in this café.',
                   style: TextStyle(color: _muted, fontSize: 12),
                 ),
                 const SizedBox(height: 10),
@@ -1122,6 +1366,14 @@ class _EditItemDialogState extends State<_EditItemDialog> {
                           () => _category = value ?? _category,
                         ),
               ),
+              if (_category == 'finished') ...[
+                const SizedBox(height: 10),
+                _StockModeField(
+                  value: _stockMode,
+                  enabled: !_saving,
+                  onChanged: (value) => setState(() => _stockMode = value),
+                ),
+              ],
               const SizedBox(height: 10),
               DropdownButtonFormField<String>(
                 initialValue: _unit,

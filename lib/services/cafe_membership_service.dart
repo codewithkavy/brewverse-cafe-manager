@@ -1,10 +1,11 @@
+import '../firebase_runtime_config.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 
 import '../models/cafe_membership.dart';
 
 class CafeMembershipService {
   CafeMembershipService({FirebaseFirestore? firestore})
-      : _db = firestore ?? FirebaseFirestore.instance;
+      : _db = firestore ?? BrewVerseFirebaseConfig.firestore;
 
   final FirebaseFirestore _db;
 

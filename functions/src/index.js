@@ -2,6 +2,7 @@ const { getApps, initializeApp } = require('firebase-admin/app');
 const { getAuth } = require('firebase-admin/auth');
 const { getFirestore } = require('firebase-admin/firestore');
 const { HttpsError, onCall } = require('firebase-functions/v2/https');
+const { verifiedIdentity } = require('./auth_policy');
 
 const {
   CafeOperationError,
@@ -33,12 +34,16 @@ if (getApps().length === 0) {
 }
 
 const db = getFirestore();
+const subscriptions = require('./subscription_service');
 
 function callable(operation) {
-  return onCall(async (request) => {
+  return onCall({ region: 'us-central1' }, async (request) => {
     const uid = request.auth?.uid;
     if (!uid) {
       throw new HttpsError('unauthenticated', 'Sign in to continue.');
+    }
+    if (!verifiedIdentity(request.auth)) {
+      throw new HttpsError('permission-denied', 'Verify your email or sign in with a verified phone number before continuing.');
     }
     try {
       return await operation(uid, request.data ?? {});
@@ -53,7 +58,7 @@ function callable(operation) {
 }
 
 exports.createCafe = callable((uid, data) =>
-  createCafeRecord({ db, uid, name: data.name }),
+  createCafeRecord({ db, uid, name: data.name, operationId: data.operationId }),
 );
 
 exports.grantCafeMembership = callable(async (uid, data) => {
@@ -112,6 +117,7 @@ exports.createStockItem = callable((uid, data) =>
     callerUid: uid,
     cafeId: data.cafeId,
     item: data.item,
+    operationId: data.operationId,
   }),
 );
 
@@ -123,6 +129,7 @@ exports.addStock = callable((uid, data) =>
     stockItemId: data.stockItemId,
     quantity: data.quantity,
     reason: data.reason,
+    operationId: data.operationId,
   }),
 );
 
@@ -208,3 +215,22 @@ exports.voidBill = callable((uid, data) =>
     reason: data.reason,
   }),
 );
+
+exports.adminSession = callable((uid) => subscriptions.session({db, uid}));
+exports.adminOverview = callable((uid) => subscriptions.overview({db, uid}));
+exports.adminListCafes = callable(async (uid, data) => {
+  const page = await subscriptions.listCafes({db, uid, cursor:data.cursor});
+  const identifiers = [...new Set(page.cafes.map(cafe=>cafe.ownerUid).filter(Boolean))].map(ownerUid=>({uid:ownerUid}));
+  const users = identifiers.length ? (await getAuth().getUsers(identifiers)).users : [];
+  page.cafes = page.cafes.map(cafe=>({...cafe,ownerEmail:users.find(user=>user.uid===cafe.ownerUid)?.email??null}));
+  return page;
+});
+exports.adminCafeDetails = callable(async (uid, data) => {
+  const detail = await subscriptions.details({db, uid, cafeId:data.cafeId});
+  try {detail.ownerEmail=(await getAuth().getUser(detail.cafe.ownerUid)).email??null;}
+  catch(error){if(error.code!=='auth/user-not-found')throw error;detail.ownerEmail=null;}
+  return detail;
+});
+exports.adminUpdateSubscription = callable((uid, data) => subscriptions.updateSubscription({...data, db, uid}));
+exports.adminSaveSubscriptionPolicy = callable((uid, data) => subscriptions.savePolicy({...data, db, uid}));
+exports.adminRecordVerifiedPayment = callable((uid, data) => subscriptions.recordPayment({...data, db, uid}));

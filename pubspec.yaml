@@ -1,7 +1,7 @@
 name: brewverse_cafe_manager
 description: Cloud-connected cafe inventory and billing starter app.
 publish_to: "none"
-version: 1.0.0+1
+version: 1.0.1+2
 
 environment:
   sdk: ">=3.3.0 <4.0.0"
@@ -19,8 +19,11 @@ dependencies:
   printing: ^5.14.2
   flutter_thermal_printer: ^2.3.0
   cloud_functions: ^5.6.2
+  shared_preferences: 2.3.3
 
 dev_dependencies:
+  integration_test:
+    sdk: flutter
   flutter_test:
     sdk: flutter
   flutter_lints: ^5.0.0

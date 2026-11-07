@@ -1,0 +1,15 @@
+{
+  "firestore": {
+    "rules": "security-tests/firestore.rules",
+    "indexes": "firestore.indexes.json"
+  },
+  "storage": {
+    "rules": "security-tests/storage.rules"
+  },
+  "functions": [
+    {
+      "source": "functions",
+      "runtime": "nodejs22"
+    }
+  ]
+}

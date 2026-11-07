@@ -12,6 +12,7 @@ import '../widgets/cafe_tab_page_factory.dart';
 import '../widgets/sales_summary_card.dart';
 import '../widgets/dashboard_sales_metrics.dart';
 import 'analytics_screen.dart';
+import 'bill_history_screen.dart';
 import 'billing_screen.dart';
 import 'bill_adjustment_screen.dart';
 import 'cafe_team_screen.dart';
@@ -369,6 +370,16 @@ class HomeScreen extends StatelessWidget {
                                 ),
                               ),
                             ],
+                          ),
+                        if (cafeId != null)
+                          Padding(
+                            padding: const EdgeInsets.only(top: 12),
+                            child: OutlinedButton.icon(
+                              onPressed: () => _open(
+                                  context, BillHistoryScreen(cafeId: cafeId!)),
+                              icon: const Icon(Icons.history_rounded),
+                              label: const Text('Bill History'),
+                            ),
                           ),
                         const SizedBox(height: 14),
                         _SectionHeader(

@@ -7,7 +7,7 @@
     "node": "22"
   },
   "scripts": {
-    "test": "node --test test/membership_service.test.js test/inventory_service.test.js test/legacy_migration_preflight.test.js test/firestore_indexes.test.js test/loyalty_service.test.js",
+    "test": "node --test test/membership_service.test.js test/inventory_service.test.js test/legacy_migration_preflight.test.js test/firestore_indexes.test.js test/loyalty_service.test.js test/auth_policy.test.js",
     "test:callables": "node --test test/callable_emulator.test.cjs",
     "migration:preflight": "node scripts/preflight_legacy_migration.js"
   },
